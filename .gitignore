@@ -1,0 +1,17 @@
+.vscode
+# Local toolchains / helper deps
+.deps/
+
+# Notchian extraction workspace (includes server.jar and generated data)
+notchian/
+
+# Local build outputs
+nethr
+nethr.exe
+
+# Generated registries from build_registries.js
+src/registries.c
+include/registries.h
+
+# Runtime world/player data
+*.bin
