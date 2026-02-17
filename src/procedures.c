@@ -145,13 +145,13 @@ int getPlayerData (int client_fd, PlayerData **output) {
 
 // Returns player by exact name slice, or NULL when not found.
 PlayerData *getPlayerByName (int start_offset, int end_offset, uint8_t *buffer) {
-  for (int i = 0; i < MAX_PLAYERS; i ++) {
-    if (player_data[i].client_fd == -1) continue;
-    int j;
-    for (j = start_offset; j < end_offset && j < 256 && buffer[j] != ' '; j++) {
-      if (player_data[i].name[j - start_offset] != buffer[j]) break;
-    }
-    if ((j == end_offset || buffer[j] == ' ') && j < 256) {
+  if (start_offset < 0 || end_offset <= start_offset || end_offset > 256) return NULL;
+
+  int target_len = end_offset - start_offset;
+  FOR_EACH_VISIBLE_PLAYER(i) {
+    int name_len = strlen(player_data[i].name);
+    if (name_len != target_len) continue;
+    if (memcmp(player_data[i].name, buffer + start_offset, target_len) == 0) {
       return &player_data[i];
     }
   }
@@ -171,10 +171,7 @@ void handlePlayerDisconnect (int client_fd) {
     strcpy((char *)recv_buffer, player_data[i].name);
     strcpy((char *)recv_buffer + player_name_len, " left the game");
     // Broadcast this player's leave to all other connected clients
-    for (int j = 0; j < MAX_PLAYERS; j ++) {
-      if (player_data[j].client_fd == -1) continue;
-      if (player_data[j].client_fd == client_fd) continue;
-      if (player_data[j].flags & 0x20) continue;
+    FOR_EACH_VISIBLE_OTHER_PLAYER(j, client_fd) {
       // Send chat message
       sc_systemChat(player_data[j].client_fd, (char *)recv_buffer, 14 + player_name_len);
       // Remove leaving player's entity
@@ -200,9 +197,7 @@ void handlePlayerJoin (PlayerData* player) {
   strcpy((char *)recv_buffer + player_name_len, " joined the game");
 
   // Inform other clients (and the joining client) of the player's name and entity
-  for (int i = 0; i < MAX_PLAYERS; i ++) {
-    if (player_data[i].client_fd == -1) continue;
-    if (player_data[i].flags & 0x20) continue;
+  FOR_EACH_VISIBLE_PLAYER(i) {
     sc_systemChat(player_data[i].client_fd, (char *)recv_buffer, 16 + player_name_len);
     sc_playerInfoUpdateAddPlayer(player_data[i].client_fd, *player);
     if (player_data[i].client_fd != player->client_fd) {
@@ -437,13 +432,9 @@ void broadcastPlayerMetadata (PlayerData *player) {
     }
   };
 
-  for (int i = 0; i < MAX_PLAYERS; i ++) {
+  FOR_EACH_VISIBLE_OTHER_PLAYER(i, player->client_fd) {
     PlayerData* other_player = &player_data[i];
     int client_fd = other_player->client_fd;
-
-    if (client_fd == -1) continue;
-    if (client_fd == player->client_fd) continue;
-    if (other_player->flags & 0x20) continue;
 
     sc_setEntityMetadata(client_fd, player->client_fd, metadata, 2);
   }
@@ -477,12 +468,9 @@ void broadcastMobMetadata (int client_fd, int entity_id) {
   }
 
   if (client_fd == -1) {
-    for (int i = 0; i < MAX_PLAYERS; i ++) {
+    FOR_EACH_VISIBLE_PLAYER(i) {
       PlayerData* player = &player_data[i];
       client_fd = player->client_fd;
-
-      if (client_fd == -1) continue;
-      if (player->flags & 0x20) continue;
 
       sc_setEntityMetadata(client_fd, entity_id, metadata, length);
     }
@@ -514,9 +502,7 @@ void failBlockChange (short x, uint8_t y, short z, uint8_t block) {
   uint8_t before = getBlockAt(x, y, z);
 
   // Broadcast a new update to all players
-  for (int i = 0; i < MAX_PLAYERS; i ++) {
-    if (player_data[i].client_fd == -1) continue;
-    if (player_data[i].flags & 0x20) continue;
+  FOR_EACH_VISIBLE_PLAYER(i) {
     // Reset the block they tried to change
     sc_blockUpdate(player_data[i].client_fd, x, y, z, before);
     // Broadcast a chat message warning about the limit
@@ -528,9 +514,7 @@ void failBlockChange (short x, uint8_t y, short z, uint8_t block) {
 uint8_t makeBlockChange (short x, uint8_t y, short z, uint8_t block) {
 
   // Transmit block update to all in-game clients
-  for (int i = 0; i < MAX_PLAYERS; i ++) {
-    if (player_data[i].client_fd == -1) continue;
-    if (player_data[i].flags & 0x20) continue;
+  FOR_EACH_VISIBLE_PLAYER(i) {
     sc_blockUpdate(player_data[i].client_fd, x, y, z, block);
   }
 

@@ -24,6 +24,22 @@
 #include "procedures.h"
 #include "packets.h"
 
+static void writeOverworldContext (int client_fd, uint8_t trailing_field) {
+  const char *dimension = "overworld";
+  writeVarInt(client_fd, 0);
+  writeVarInt(client_fd, 9);
+  send_all(client_fd, dimension, 9);
+  writeUint64(client_fd, 0x0123456789ABCDEF);
+  writeByte(client_fd, GAMEMODE);
+  writeByte(client_fd, 0xFF);
+  writeByte(client_fd, 0);
+  writeByte(client_fd, 0);
+  writeByte(client_fd, 0);
+  writeVarInt(client_fd, 0);
+  writeVarInt(client_fd, 63);
+  writeByte(client_fd, trailing_field);
+}
+
 // S->C Status Response (server list ping)
 int sc_statusResponse (int client_fd) {
 
@@ -198,8 +214,7 @@ int sc_loginPlay (int client_fd) {
   // Dimensions
   writeVarInt(client_fd, 1);
   writeVarInt(client_fd, 9);
-  const char *dimension = "overworld";
-  send_all(client_fd, dimension, 9);
+  send_all(client_fd, "overworld", 9);
   // Maxplayers
   writeVarInt(client_fd, MAX_PLAYERS);
   // View distance
@@ -212,30 +227,8 @@ int sc_loginPlay (int client_fd) {
   writeByte(client_fd, true);
   // Limited crafting
   writeByte(client_fd, false);
-  // Dimension id (from server-sent registries)
-  // The server only sends "overworld"
-  writeVarInt(client_fd, 0);
-  // Dimension name
-  writeVarInt(client_fd, 9);
-  send_all(client_fd, dimension, 9);
-  // Hashed seed
-  writeUint64(client_fd, 0x0123456789ABCDEF);
-  // Gamemode
-  writeByte(client_fd, GAMEMODE);
-  // Previous gamemode
-  writeByte(client_fd, 0xFF);
-  // Is debug
-  writeByte(client_fd, 0);
-  // Is flat
-  writeByte(client_fd, 0);
-  // Has death location
-  writeByte(client_fd, 0);
-  // Portal cooldown
-  writeVarInt(client_fd, 0);
-  // Sea level
-  writeVarInt(client_fd, 63);
-  // Secure chat
-  writeByte(client_fd, 0);
+  // Dimension/game context.
+  writeOverworldContext(client_fd, 0);
 
   return 0;
 
@@ -794,13 +787,8 @@ int cs_swingArm (int client_fd) {
     return 1;
 
   // Forward animation to all connected players
-  for (int i = 0; i < MAX_PLAYERS; i ++) {
+  FOR_EACH_VISIBLE_OTHER_PLAYER(i, player->client_fd) {
     PlayerData* other_player = &player_data[i];
-
-    if (other_player->client_fd == -1) continue;
-    if (other_player->client_fd == player->client_fd) continue;
-    if (other_player->flags & 0x20) continue;
-
     sc_entityAnimation(other_player->client_fd, player->client_fd, animation);
   }
 
@@ -1056,30 +1044,8 @@ int sc_respawn (int client_fd) {
   writeVarInt(client_fd, 28);
   writeByte(client_fd, 0x4B);
 
-  // Dimension id (from server-sent registries)
-  writeVarInt(client_fd, 0);
-  // Dimension name
-  const char *dimension = "overworld";
-  writeVarInt(client_fd, 9);
-  send_all(client_fd, dimension, 9);
-  // Hashed seed
-  writeUint64(client_fd, 0x0123456789ABCDEF);
-  // Gamemode
-  writeByte(client_fd, GAMEMODE);
-  // Previous gamemode
-  writeByte(client_fd, 0xFF);
-  // Is debug
-  writeByte(client_fd, 0);
-  // Is flat
-  writeByte(client_fd, 0);
-  // Has death location
-  writeByte(client_fd, 0);
-  // Portal cooldown
-  writeVarInt(client_fd, 0);
-  // Sea level
-  writeVarInt(client_fd, 63);
-  // Data kept
-  writeByte(client_fd, 0);
+  // Dimension/game context.
+  writeOverworldContext(client_fd, 0);
 
   return 0;
 }
@@ -1142,9 +1108,7 @@ int cs_chat (int client_fd) {
     recv_buffer[name_len + 2] = ' ';
 
     // Forward message to all connected players
-    for (int i = 0; i < MAX_PLAYERS; i ++) {
-      if (player_data[i].client_fd == -1) continue;
-      if (player_data[i].flags & 0x20) continue;
+    FOR_EACH_VISIBLE_PLAYER(i) {
       sc_systemChat(player_data[i].client_fd, (char *)recv_buffer, message_len + name_len + 3);
     }
 

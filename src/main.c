@@ -62,9 +62,7 @@ static void broadcastSystemMessage (const char *message, size_t len) {
   memcpy(out, ADMIN_PIPE_PREFIX, prefix_len);
   memcpy(out + prefix_len, message, len);
 
-  for (int i = 0; i < MAX_PLAYERS; i ++) {
-    if (player_data[i].client_fd == -1) continue;
-    if (player_data[i].flags & 0x20) continue;
+  FOR_EACH_VISIBLE_PLAYER(i) {
     sc_systemChat(player_data[i].client_fd, out, (uint16_t)(prefix_len + len));
   }
 }
@@ -202,10 +200,7 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
         spawnPlayer(player);
 
         // Register already connected players for this client.
-        for (int i = 0; i < MAX_PLAYERS; i ++) {
-          if (player_data[i].client_fd == -1) continue;
-          // Loading players are not visible yet.
-          if (player_data[i].flags & 0x20) continue;
+        FOR_EACH_VISIBLE_PLAYER(i) {
           sc_playerInfoUpdateAddPlayer(client_fd, player_data[i]);
           sc_spawnEntityPlayer(client_fd, player_data[i]);
         }
@@ -336,10 +331,7 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
             pitch = player->pitch * 90 / 127;
           }
           // Broadcast movement to visible clients.
-          for (int i = 0; i < MAX_PLAYERS; i ++) {
-            if (player_data[i].client_fd == -1) continue;
-            if (player_data[i].flags & 0x20) continue;
-            if (player_data[i].client_fd == client_fd) continue;
+          FOR_EACH_VISIBLE_OTHER_PLAYER(i, client_fd) {
             if (packet_id == 0x1F) {
               sc_updateEntityRotation(player_data[i].client_fd, client_fd, player->yaw, player->pitch);
             } else {

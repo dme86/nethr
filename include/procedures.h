@@ -7,6 +7,14 @@
 
 extern int client_states[MAX_PLAYERS * 2];
 
+#define FOR_EACH_VISIBLE_PLAYER(i) \
+  for (int i = 0; i < MAX_PLAYERS; i ++) \
+    if (player_data[i].client_fd != -1 && !(player_data[i].flags & 0x20))
+
+#define FOR_EACH_VISIBLE_OTHER_PLAYER(i, self_fd) \
+  for (int i = 0; i < MAX_PLAYERS; i ++) \
+    if (player_data[i].client_fd != -1 && player_data[i].client_fd != (self_fd) && !(player_data[i].flags & 0x20))
+
 void setClientState (int client_fd, int new_state);
 int getClientState (int client_fd);
 int getClientIndex (int client_fd);
