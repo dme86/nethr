@@ -137,7 +137,9 @@
 
 // Enable item pickup animation on block break.
 // Items are still inserted directly into inventory.
-#define ENABLE_PICKUP_ANIMATION
+// Temporarily disabled in current 1.21.11 compatibility mode because
+// add_entity encoding is not finalized yet.
+// #define ENABLE_PICKUP_ANIMATION
 
 // If defined, players are able to receive damage from nearby cacti.
 #define ENABLE_CACTUS_DAMAGE

@@ -465,6 +465,13 @@ void spawnPlayer (PlayerData *player) {
     spawn_pitch = player->pitch * 90 / 127;
   }
 
+  #ifdef CHUNK_TEMPLATE_VISIBILITY_COMPAT
+    // Template chunks were captured around y~112.
+    // Use a stable spawn height in compatibility mode.
+    spawn_y = 112.0f;
+    player->y = 112;
+  #endif
+
   // Teleport player to spawn coordinates (first pass)
   printf(
     "Spawn sequence: initial player_position (x=%.2f y=%.2f z=%.2f yaw=%.2f pitch=%.2f)\n",
@@ -504,6 +511,9 @@ void spawnPlayer (PlayerData *player) {
   // Indicate that we're about to send chunk data
   printf("Spawn sequence: set_default_spawn_position + game_event(wait_chunks) + set_chunk_cache_center\n");
   int default_spawn_y = getHeightAt(8, 8) + 1;
+  #ifdef CHUNK_TEMPLATE_VISIBILITY_COMPAT
+    default_spawn_y = 112;
+  #endif
   sc_setDefaultSpawnPosition(player->client_fd, "minecraft:overworld", 8, default_spawn_y, 8, 0.0f, 0.0f);
   sc_startWaitingForChunks(player->client_fd);
   sc_setCenterChunk(player->client_fd, _x, _z);
