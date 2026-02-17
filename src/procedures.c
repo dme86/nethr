@@ -503,7 +503,8 @@ void spawnPlayer (PlayerData *player) {
 
   // Indicate that we're about to send chunk data
   printf("Spawn sequence: set_default_spawn_position + game_event(wait_chunks) + set_chunk_cache_center\n");
-  sc_setDefaultSpawnPosition(player->client_fd, "minecraft:overworld", 8, 80, 8, 0.0f, 0.0f);
+  int default_spawn_y = getHeightAt(8, 8) + 1;
+  sc_setDefaultSpawnPosition(player->client_fd, "minecraft:overworld", 8, default_spawn_y, 8, 0.0f, 0.0f);
   sc_startWaitingForChunks(player->client_fd);
   sc_setCenterChunk(player->client_fd, _x, _z);
 

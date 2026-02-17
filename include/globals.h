@@ -113,6 +113,10 @@
 // Verbose registry/tag dump in configuration phase.
 // #define DEBUG_REGISTRY_VERBOSE
 
+// Temporary compatibility mode while using the Notchian chunk template.
+// Spawns players high above terrain and forces daytime visibility.
+#define CHUNK_TEMPLATE_VISIBILITY_COMPAT
+
 // Rebroadcast all movement packets immediately, independent of tick rate.
 // Improves smoothness on low tick rates at higher network cost.
 #define BROADCAST_ALL_MOVEMENT

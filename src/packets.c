@@ -730,9 +730,16 @@ int sc_updateTime (int client_fd, uint64_t ticks) {
   writeVarInt(client_fd, 0x6F);
 
   uint64_t world_age = get_program_time() / 50000;
+  #ifdef CHUNK_TEMPLATE_VISIBILITY_COMPAT
+    ticks = 6000; // Midday for better visibility in template-chunk mode.
+  #endif
   writeUint64(client_fd, world_age);
   writeUint64(client_fd, ticks);
-  writeByte(client_fd, true);
+  #ifdef CHUNK_TEMPLATE_VISIBILITY_COMPAT
+    writeByte(client_fd, false); // Freeze daylight cycle while debugging.
+  #else
+    writeByte(client_fd, true);
+  #endif
 
   return 0;
 }
