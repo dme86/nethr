@@ -40,6 +40,123 @@
 // Total bytes read via recv_all; used for packet length reconciliation.
 uint64_t total_bytes_received = 0;
 
+#define SEND_BUFFER_SIZE 4096
+#define SEND_BUFFER_SLOTS (MAX_PLAYERS * 2)
+
+typedef struct {
+  int fd;
+  size_t len;
+  uint8_t data[SEND_BUFFER_SIZE];
+} SendBuffer;
+
+static SendBuffer send_buffers[SEND_BUFFER_SLOTS];
+static uint8_t send_buffers_ready = false;
+
+static void initSendBuffers () {
+  if (send_buffers_ready) return;
+  for (int i = 0; i < SEND_BUFFER_SLOTS; i ++) {
+    send_buffers[i].fd = -1;
+    send_buffers[i].len = 0;
+  }
+  send_buffers_ready = true;
+}
+
+static int findSendBufferSlot (int client_fd, uint8_t create) {
+  initSendBuffers();
+
+  int free_slot = -1;
+  for (int i = 0; i < SEND_BUFFER_SLOTS; i ++) {
+    if (send_buffers[i].fd == client_fd) return i;
+    if (send_buffers[i].fd == -1 && free_slot == -1) free_slot = i;
+  }
+
+  if (!create || free_slot == -1) return -1;
+  send_buffers[free_slot].fd = client_fd;
+  send_buffers[free_slot].len = 0;
+  return free_slot;
+}
+
+static ssize_t send_all_raw (int client_fd, const void *buf, ssize_t len) {
+  // Serialize buffer as raw bytes.
+  const uint8_t *p = (const uint8_t *)buf;
+  ssize_t sent = 0;
+
+  // Timestamp of last successful socket progress.
+  int64_t last_update_time = get_program_time();
+
+  // Keep sending until all bytes are written.
+  while (sent < len) {
+    #ifdef _WIN32
+      ssize_t n = send(client_fd, p + sent, len - sent, 0);
+    #else
+      ssize_t n = send(client_fd, p + sent, len - sent, MSG_NOSIGNAL);
+    #endif
+    if (n > 0) { // Some data was sent.
+      sent += n;
+      last_update_time = get_program_time();
+      continue;
+    }
+    if (n == 0) { // Peer closed connection.
+      errno = ECONNRESET;
+      return -1;
+    }
+    // Retry on transient socket conditions.
+    #ifdef _WIN32 // Handle WinSock non-blocking retry codes.
+      int err = WSAGetLastError();
+      if (err == WSAEWOULDBLOCK || err == WSAEINTR) {
+    #else
+    if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+    #endif
+      // Enforce I/O timeout while socket is stalled.
+      if (get_program_time() - last_update_time > NETWORK_TIMEOUT_TIME) {
+        disconnectClient(&client_fd, -2);
+        return -1;
+      }
+      task_yield();
+      continue;
+    }
+    return -1; // Unrecoverable socket error.
+  }
+
+  return sent;
+}
+
+static ssize_t flushSendBufferSlot (int slot) {
+  if (slot < 0 || slot >= SEND_BUFFER_SLOTS) return -1;
+
+  SendBuffer *buffer = &send_buffers[slot];
+  if (buffer->fd == -1 || buffer->len == 0) return 0;
+
+  ssize_t written = send_all_raw(buffer->fd, buffer->data, (ssize_t)buffer->len);
+  if (written < 0) return -1;
+  buffer->len = 0;
+  return written;
+}
+
+static ssize_t bufferWrite (int client_fd, const void *buf, size_t len) {
+  if (len == 0) return 0;
+
+  int slot = findSendBufferSlot(client_fd, true);
+  if (slot == -1) {
+    return send_all_raw(client_fd, buf, (ssize_t)len);
+  }
+
+  SendBuffer *buffer = &send_buffers[slot];
+
+  if (len > SEND_BUFFER_SIZE) {
+    if (flushSendBufferSlot(slot) < 0) return -1;
+    return send_all_raw(client_fd, buf, (ssize_t)len);
+  }
+
+  if (buffer->len + len > SEND_BUFFER_SIZE) {
+    if (flushSendBufferSlot(slot) < 0) return -1;
+  }
+
+  memcpy(buffer->data + buffer->len, buf, len);
+  buffer->len += len;
+  return (ssize_t)len;
+}
+
 ssize_t recv_all (int client_fd, void *buf, size_t n, uint8_t require_first) {
   char *p = buf;
   size_t total = 0;
@@ -88,48 +205,9 @@ ssize_t recv_all (int client_fd, void *buf, size_t n, uint8_t require_first) {
 }
 
 ssize_t send_all (int client_fd, const void *buf, ssize_t len) {
-  // Serialize buffer as raw bytes.
-  const uint8_t *p = (const uint8_t *)buf;
-  ssize_t sent = 0;
-
-  // Timestamp of last successful socket progress.
-  int64_t last_update_time = get_program_time();
-
-  // Keep sending until all bytes are written.
-  while (sent < len) {
-    #ifdef _WIN32
-      ssize_t n = send(client_fd, p + sent, len - sent, 0);
-    #else
-      ssize_t n = send(client_fd, p + sent, len - sent, MSG_NOSIGNAL);
-    #endif
-    if (n > 0) { // Some data was sent.
-      sent += n;
-      last_update_time = get_program_time();
-      continue;
-    }
-    if (n == 0) { // Peer closed connection.
-      errno = ECONNRESET;
-      return -1;
-    }
-    // Retry on transient socket conditions.
-    #ifdef _WIN32 // Handle WinSock non-blocking retry codes.
-      int err = WSAGetLastError();
-      if (err == WSAEWOULDBLOCK || err == WSAEINTR) {
-    #else
-    if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
-    #endif
-      // Enforce I/O timeout while socket is stalled.
-      if (get_program_time() - last_update_time > NETWORK_TIMEOUT_TIME) {
-        disconnectClient(&client_fd, -2);
-        return -1;
-      }
-      task_yield();
-      continue;
-    }
-    return -1; // Unrecoverable socket error.
-  }
-
-  return sent;
+  int slot = findSendBufferSlot(client_fd, false);
+  if (slot != -1 && flushSendBufferSlot(slot) < 0) return -1;
+  return send_all_raw(client_fd, buf, len);
 }
 
 void discard_all (int client_fd, size_t remaining, uint8_t require_first) {
@@ -144,31 +222,45 @@ void discard_all (int client_fd, size_t remaining, uint8_t require_first) {
 }
 
 ssize_t writeByte (int client_fd, uint8_t byte) {
-  return send_all(client_fd, &byte, 1);
+  return bufferWrite(client_fd, &byte, 1);
 }
 ssize_t writeUint16 (int client_fd, uint16_t num) {
   uint16_t be = htons(num);
-  return send_all(client_fd, &be, sizeof(be));
+  return bufferWrite(client_fd, &be, sizeof(be));
 }
 ssize_t writeUint32 (int client_fd, uint32_t num) {
   uint32_t be = htonl(num);
-  return send_all(client_fd, &be, sizeof(be));
+  return bufferWrite(client_fd, &be, sizeof(be));
 }
 ssize_t writeUint64 (int client_fd, uint64_t num) {
   uint64_t be = htonll(num);
-  return send_all(client_fd, &be, sizeof(be));
+  return bufferWrite(client_fd, &be, sizeof(be));
 }
 ssize_t writeFloat (int client_fd, float num) {
   uint32_t bits;
   memcpy(&bits, &num, sizeof(bits));
   bits = htonl(bits);
-  return send_all(client_fd, &bits, sizeof(bits));
+  return bufferWrite(client_fd, &bits, sizeof(bits));
 }
 ssize_t writeDouble (int client_fd, double num) {
   uint64_t bits;
   memcpy(&bits, &num, sizeof(bits));
   bits = htonll(bits);
-  return send_all(client_fd, &bits, sizeof(bits));
+  return bufferWrite(client_fd, &bits, sizeof(bits));
+}
+
+void flush_send_buffer (int client_fd) {
+  int slot = findSendBufferSlot(client_fd, false);
+  if (slot == -1) return;
+  flushSendBufferSlot(slot);
+}
+
+void flush_all_send_buffers () {
+  initSendBuffers();
+  for (int i = 0; i < SEND_BUFFER_SLOTS; i ++) {
+    if (send_buffers[i].fd == -1 || send_buffers[i].len == 0) continue;
+    flushSendBufferSlot(i);
+  }
 }
 
 uint8_t readByte (int client_fd) {
@@ -259,10 +351,7 @@ void readStringN (int client_fd, uint32_t max_length) {
   // Read up to cap, discard remaining bytes from wire.
   recv_count = recv_all(client_fd, recv_buffer, max_length, false);
   recv_buffer[recv_count] = '\0';
-  uint8_t dummy;
-  for (uint32_t i = max_length; i < length; i ++) {
-    recv_all(client_fd, &dummy, 1, false);
-  }
+  discard_all(client_fd, length - max_length, false);
 }
 
 uint32_t fast_rand () {

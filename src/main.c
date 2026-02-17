@@ -576,6 +576,7 @@ int main () {
   for (int i = 0; i < MAX_BLOCK_CHANGES; i ++) {
     block_changes[i].block = 0xFF;
   }
+  invalidateBlockChangeIndex();
 
   // Initialize persistence backend when enabled.
   if (initSerializer()) exit(EXIT_FAILURE);
@@ -672,6 +673,7 @@ int main () {
 
     #if !defined(ESP_PLATFORM) && !defined(_WIN32)
       pollAdminPipe();
+      flush_all_send_buffers();
     #endif
 
     // Round-robin through active client slots.
@@ -683,6 +685,7 @@ int main () {
     int64_t time_since_last_tick = get_program_time() - last_tick_time;
     if (time_since_last_tick > TIME_BETWEEN_TICKS) {
       handleServerTick(time_since_last_tick);
+      flush_all_send_buffers();
       last_tick_time = get_program_time();
     }
 
@@ -740,6 +743,7 @@ int main () {
         if (block_changes[i].block == B_chest) i += 14;
         if (i >= block_changes_count) block_changes_count = i + 1;
       }
+      invalidateBlockChangeIndex();
       // Persist imported state.
       writeBlockChangesToDisk(0, block_changes_count);
       writePlayerDataToDisk();
@@ -769,6 +773,7 @@ int main () {
     }
     // Dispatch packet payload.
     handlePacket(client_fd, length - sizeVarInt(packet_id), packet_id, state);
+    flush_all_send_buffers();
     if (recv_count == 0 || (recv_count == -1 && errno != EAGAIN && errno != EWOULDBLOCK)) {
       disconnectClient(&clients[client_index], 4);
       continue;

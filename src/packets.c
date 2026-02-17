@@ -40,6 +40,19 @@ static void writeOverworldContext (int client_fd, uint8_t trailing_field) {
   writeByte(client_fd, trailing_field);
 }
 
+static uint8_t sky_light_full[2048];
+static uint8_t sky_light_dark[2048];
+static uint8_t sky_light_buffers_initialized = false;
+
+static void initSkyLightBuffers () {
+  if (sky_light_buffers_initialized) return;
+  for (int i = 0; i < 2048; i ++) {
+    sky_light_full[i] = 0xFF;
+    sky_light_dark[i] = 0x00;
+  }
+  sky_light_buffers_initialized = true;
+}
+
 // S->C Status Response (server list ping)
 int sc_statusResponse (int client_fd) {
 
@@ -323,6 +336,7 @@ int sc_setCenterChunk (int client_fd, int x, int y) {
 
 // S->C Chunk Data and Update Light
 int sc_chunkDataAndUpdateLight (int client_fd, int _x, int _z) {
+  initSkyLightBuffers();
 
   const int chunk_data_size = (4101 + sizeVarInt(256) + sizeof(network_block_palette)) * 20 + 6 * 12;
   const int light_data_size = 14 + (sizeVarInt(2048) + 2048) * 26;
@@ -390,15 +404,13 @@ int sc_chunkDataAndUpdateLight (int client_fd, int _x, int _z) {
 
   // Sky light array
   writeVarInt(client_fd, 26);
-  for (int i = 0; i < 2048; i ++) chunk_section[i] = 0xFF;
-  for (int i = 2048; i < 4096; i ++) chunk_section[i] = 0;
   for (int i = 0; i < 8; i ++) {
     writeVarInt(client_fd, 2048);
-    send_all(client_fd, chunk_section + 2048, 2048);
+    send_all(client_fd, sky_light_dark, 2048);
   }
   for (int i = 0; i < 18; i ++) {
     writeVarInt(client_fd, 2048);
-    send_all(client_fd, chunk_section, 2048);
+    send_all(client_fd, sky_light_full, 2048);
   }
   // Don't send block light
   writeVarInt(client_fd, 0);
@@ -407,14 +419,14 @@ int sc_chunkDataAndUpdateLight (int client_fd, int _x, int _z) {
   // Light-emitting blocks are omitted from chunk data so that they can
   // Be overlayed here. This seems to be cheaper than sending actual
   // Block light data.
-  for (int i = 0; i < block_changes_count; i ++) {
+  for (int i = firstBlockChangeInChunk(_x, _z); i != -1; i = nextIndexedBlockChange(i)) {
+    if (div_floor(block_changes[i].x, 16) != _x) continue;
+    if (div_floor(block_changes[i].z, 16) != _z) continue;
     #ifdef ALLOW_CHESTS
       if (block_changes[i].block != B_torch && block_changes[i].block != B_chest) continue;
     #else
       if (block_changes[i].block != B_torch) continue;
     #endif
-    if (block_changes[i].x < x || block_changes[i].x >= x + 16) continue;
-    if (block_changes[i].z < z || block_changes[i].z >= z + 16) continue;
     sc_blockUpdate(client_fd, block_changes[i].x, block_changes[i].y, block_changes[i].z, block_changes[i].block);
   }
 

@@ -13,6 +13,7 @@
 #include "tools.h"
 #include "registries.h"
 #include "serialize.h"
+#include "procedures.h"
 
 int64_t last_disk_sync_time = 0;
 
@@ -54,6 +55,7 @@ int initSerializer () {
       if (block_changes[i].block == B_chest) i += 14;
       if (i >= block_changes_count) block_changes_count = i + 1;
     }
+    invalidateBlockChangeIndex();
     // Seek to persisted player section.
     if (fseek(file, sizeof(block_changes), SEEK_SET) != 0) {
       perror("Failed to seek to player data in \"world.bin\". Aborting.");

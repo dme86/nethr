@@ -35,6 +35,92 @@ static uint8_t isInNetherZone (short z) {
   return z >= NETHER_ZONE_OFFSET;
 }
 
+#define BLOCK_CHANGE_BUCKETS 1024
+
+static int16_t block_change_bucket_heads[BLOCK_CHANGE_BUCKETS];
+static int16_t block_change_next[MAX_BLOCK_CHANGES];
+static uint8_t block_change_index_initialized = false;
+static uint8_t block_change_index_dirty = true;
+
+static void initBlockChangeIndexStorage () {
+  if (block_change_index_initialized) return;
+  for (int i = 0; i < BLOCK_CHANGE_BUCKETS; i ++) {
+    block_change_bucket_heads[i] = -1;
+  }
+  for (int i = 0; i < MAX_BLOCK_CHANGES; i ++) {
+    block_change_next[i] = -1;
+  }
+  block_change_index_initialized = true;
+}
+
+static uint16_t getBlockChangeBucket (short chunk_x, short chunk_z) {
+  uint32_t ux = (uint32_t)(uint16_t)chunk_x;
+  uint32_t uz = (uint32_t)(uint16_t)chunk_z;
+  uint32_t hash = ux * 73856093u ^ uz * 19349663u;
+  return (uint16_t)(hash & (BLOCK_CHANGE_BUCKETS - 1));
+}
+
+static void rebuildBlockChangeIndex () {
+  initBlockChangeIndexStorage();
+
+  for (int i = 0; i < BLOCK_CHANGE_BUCKETS; i ++) {
+    block_change_bucket_heads[i] = -1;
+  }
+  for (int i = 0; i < block_changes_count; i ++) {
+    block_change_next[i] = -1;
+  }
+
+  for (int i = 0; i < block_changes_count; i ++) {
+    uint8_t block = block_changes[i].block;
+    if (block == 0xFF) continue;
+
+    short chunk_x = div_floor(block_changes[i].x, 16);
+    short chunk_z = div_floor(block_changes[i].z, 16);
+    uint16_t bucket = getBlockChangeBucket(chunk_x, chunk_z);
+
+    block_change_next[i] = block_change_bucket_heads[bucket];
+    block_change_bucket_heads[bucket] = i;
+
+    #ifdef ALLOW_CHESTS
+      if (block == B_chest) i += 14;
+    #endif
+  }
+
+  block_change_index_dirty = false;
+}
+
+static void ensureBlockChangeIndex () {
+  if (!block_change_index_dirty) return;
+  rebuildBlockChangeIndex();
+}
+
+void invalidateBlockChangeIndex () {
+  block_change_index_dirty = true;
+}
+
+int firstBlockChangeInChunk (short chunk_x, short chunk_z) {
+  ensureBlockChangeIndex();
+  return block_change_bucket_heads[getBlockChangeBucket(chunk_x, chunk_z)];
+}
+
+int nextIndexedBlockChange (int index) {
+  if (index < 0 || index >= block_changes_count) return -1;
+  return block_change_next[index];
+}
+
+int findBlockChangeIndex (short x, uint8_t y, short z) {
+  short chunk_x = div_floor(x, 16);
+  short chunk_z = div_floor(z, 16);
+
+  for (int i = firstBlockChangeInChunk(chunk_x, chunk_z); i != -1; i = nextIndexedBlockChange(i)) {
+    if (block_changes[i].x == x && block_changes[i].y == y && block_changes[i].z == z) {
+      return i;
+    }
+  }
+
+  return -1;
+}
+
 void setClientState (int client_fd, int new_state) {
   // Look for a client state with a matching file descriptor
   for (int i = 0; i < MAX_PLAYERS * 2; i += 2) {
@@ -480,18 +566,8 @@ void broadcastMobMetadata (int client_fd, int entity_id) {
 }
 
 uint8_t getBlockChange (short x, uint8_t y, short z) {
-  for (int i = 0; i < block_changes_count; i ++) {
-    if (block_changes[i].block == 0xFF) continue;
-    if (
-      block_changes[i].x == x &&
-      block_changes[i].y == y &&
-      block_changes[i].z == z
-    ) return block_changes[i].block;
-    #ifdef ALLOW_CHESTS
-      // Skip chest contents
-      if (block_changes[i].block == B_chest) i += 14;
-    #endif
-  }
+  int index = findBlockChangeIndex(x, y, z);
+  if (index != -1) return block_changes[index].block;
   return 0xFF;
 }
 
@@ -566,6 +642,7 @@ uint8_t makeBlockChange (short x, uint8_t y, short z, uint8_t block) {
           #ifndef DISK_SYNC_BLOCKS_ON_INTERVAL
           writeBlockChangesToDisk(i, i);
           #endif
+          invalidateBlockChangeIndex();
           break;
         }
         #endif
@@ -574,6 +651,7 @@ uint8_t makeBlockChange (short x, uint8_t y, short z, uint8_t block) {
       #ifndef DISK_SYNC_BLOCKS_ON_INTERVAL
       writeBlockChangesToDisk(i, i);
       #endif
+      invalidateBlockChangeIndex();
       return 0;
     }
   }
@@ -616,6 +694,7 @@ uint8_t makeBlockChange (short x, uint8_t y, short z, uint8_t block) {
       #ifndef DISK_SYNC_BLOCKS_ON_INTERVAL
       writeBlockChangesToDisk(last_real_entry + 1, last_real_entry + 15);
       #endif
+      invalidateBlockChangeIndex();
       return 0;
     }
     // If we're here, no changes were made
@@ -644,6 +723,7 @@ uint8_t makeBlockChange (short x, uint8_t y, short z, uint8_t block) {
     block_changes_count ++;
   }
 
+  invalidateBlockChangeIndex();
   return 0;
 }
 
@@ -1263,11 +1343,9 @@ void handlePlayerUseItem (PlayerData *player, short x, short y, short z, uint8_t
     else if (target == B_chest) {
       // Get a pointer to the entry following this chest in block_changes
       uint8_t *storage_ptr = NULL;
-      for (int i = 0; i < block_changes_count; i ++) {
-        if (block_changes[i].block != B_chest) continue;
-        if (block_changes[i].x != x || block_changes[i].y != y || block_changes[i].z != z) continue;
-        storage_ptr = (uint8_t *)(&block_changes[i + 1]);
-        break;
+      int chest_index = findBlockChangeIndex(x, y, z);
+      if (chest_index != -1 && block_changes[chest_index].block == B_chest) {
+        storage_ptr = (uint8_t *)(&block_changes[chest_index + 1]);
       }
       if (storage_ptr == NULL) return;
       // Terrible memory hack!!
@@ -1733,11 +1811,20 @@ void hurtEntity (int entity_id, int attacker_id, uint8_t damage_type, uint8_t da
 // Simulates events scheduled for regular intervals
 // Takes the time since the last tick in microseconds as the only arguemnt
 void handleServerTick (int64_t time_since_last_tick) {
+  static uint8_t attack_cooldown_ticks = 0;
+  static uint16_t eating_ticks = 0;
+  static uint8_t tick_thresholds_ready = false;
+  if (!tick_thresholds_ready) {
+    attack_cooldown_ticks = (uint8_t)(0.6f * TICKS_PER_SECOND);
+    eating_ticks = (uint16_t)(1.6f * TICKS_PER_SECOND);
+    tick_thresholds_ready = true;
+  }
 
   // Update world time
   world_time = (world_time + time_since_last_tick / 50000) % 24000;
   // Increment server tick counter
   server_ticks ++;
+  uint8_t is_second_tick = (server_ticks % (uint32_t)TICKS_PER_SECOND) == 0;
 
   // Update player events
   for (int i = 0; i < MAX_PLAYERS; i ++) {
@@ -1752,14 +1839,14 @@ void handleServerTick (int64_t time_since_last_tick) {
     }
     // Reset player attack cooldown
     if (player->flags & 0x01) {
-      if (player->flagval_8 >= (uint8_t)(0.6f * TICKS_PER_SECOND)) {
+      if (player->flagval_8 >= attack_cooldown_ticks) {
         player->flags &= ~0x01;
         player->flagval_8 = 0;
       } else player->flagval_8 ++;
     }
     // Handle eating animation
     if (player->flags & 0x10) {
-      if (player->flagval_16 >= (uint16_t)(1.6f * TICKS_PER_SECOND)) {
+      if (player->flagval_16 >= eating_ticks) {
         handlePlayerEating(&player_data[i], false);
         player->flags &= ~0x10;
         player->flagval_16 = 0;
@@ -1771,7 +1858,7 @@ void handleServerTick (int64_t time_since_last_tick) {
       player->flags &= ~0x40;
     #endif
     // Below this, process events that happen once per second
-    if (server_ticks % (uint32_t)TICKS_PER_SECOND != 0) continue;
+    if (!is_second_tick) continue;
     // Send Keep Alive and Update Time packets
     sc_keepAlive(player->client_fd);
     sc_updateTime(player->client_fd, world_time);
