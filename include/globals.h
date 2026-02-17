@@ -106,6 +106,13 @@
 // Brand text is defined in src/globals.c.
 #define SEND_BRAND
 
+// Debug mode: send only the initial play login packet after configuration.
+// Useful to isolate login decode issues before spawn/chunk packets.
+// #define DEBUG_LOGIN_ONLY
+
+// Verbose registry/tag dump in configuration phase.
+// #define DEBUG_REGISTRY_VERBOSE
+
 // Rebroadcast all movement packets immediately, independent of tick rate.
 // Improves smoothness on low tick rates at higher network cost.
 #define BROADCAST_ALL_MOVEMENT

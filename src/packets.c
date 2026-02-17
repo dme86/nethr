@@ -1,5 +1,7 @@
 #include <stdio.h>
 #include <string.h>
+#include <inttypes.h>
+#include <stdlib.h>
 
 #ifdef ESP_PLATFORM
   #include "lwip/sockets.h"
@@ -24,20 +26,30 @@
 #include "procedures.h"
 #include "packets.h"
 
-static void writeOverworldContext (int client_fd, uint8_t trailing_field) {
-  const char *dimension = "overworld";
+static void writeOverworldContext (int client_fd) {
+  const char *dimension = "minecraft:overworld";
+  int dimension_len = (int)strlen(dimension);
+  // CommonPlayerSpawnInfo.dimensionType.
+  // Notchian 1.21.11 encodes overworld as varint 0 in this context.
   writeVarInt(client_fd, 0);
-  writeVarInt(client_fd, 9);
-  send_all(client_fd, dimension, 9);
+  // CommonPlayerSpawnInfo.dimension (ResourceKey<Level>)
+  writeVarInt(client_fd, dimension_len);
+  send_all(client_fd, dimension, dimension_len);
+  // CommonPlayerSpawnInfo.seed
   writeUint64(client_fd, 0x0123456789ABCDEF);
+  // CommonPlayerSpawnInfo.gameType
   writeByte(client_fd, GAMEMODE);
+  // CommonPlayerSpawnInfo.previousGameType (-1 means none)
   writeByte(client_fd, 0xFF);
+  // CommonPlayerSpawnInfo.isDebug / isFlat
   writeByte(client_fd, 0);
   writeByte(client_fd, 0);
+  // CommonPlayerSpawnInfo.lastDeathLocation (Optional<GlobalPos>) - absent
   writeByte(client_fd, 0);
+  // CommonPlayerSpawnInfo.portalCooldown
   writeVarInt(client_fd, 0);
+  // CommonPlayerSpawnInfo.seaLevel
   writeVarInt(client_fd, 63);
-  writeByte(client_fd, trailing_field);
 }
 
 static uint8_t sky_light_full[2048];
@@ -53,11 +65,264 @@ static void initSkyLightBuffers () {
   sky_light_buffers_initialized = true;
 }
 
+static uint8_t *chunk_template_0x2c = NULL;
+static size_t chunk_template_0x2c_len = 0;
+static uint8_t chunk_template_0x2c_loaded = false;
+
+static void writeInt32BE (uint8_t *buf, int32_t v) {
+  uint32_t u = (uint32_t)v;
+  buf[0] = (uint8_t)((u >> 24) & 0xFF);
+  buf[1] = (uint8_t)((u >> 16) & 0xFF);
+  buf[2] = (uint8_t)((u >> 8) & 0xFF);
+  buf[3] = (uint8_t)(u & 0xFF);
+}
+
+static void tryLoadChunkTemplate0x2c () {
+  if (chunk_template_0x2c_loaded) return;
+  chunk_template_0x2c_loaded = true;
+
+  const char *path = "assets/chunk_template_1.21.11_0x2c.bin";
+  FILE *fp = fopen(path, "rb");
+  if (fp == NULL) {
+    printf("Chunk template unavailable at %s; using built-in encoder\n\n", path);
+    return;
+  }
+
+  if (fseek(fp, 0, SEEK_END) != 0) {
+    fclose(fp);
+    return;
+  }
+  long size = ftell(fp);
+  if (size <= 0 || size > 1 << 20) {
+    fclose(fp);
+    return;
+  }
+  rewind(fp);
+
+  chunk_template_0x2c = malloc((size_t)size);
+  if (chunk_template_0x2c == NULL) {
+    fclose(fp);
+    return;
+  }
+  size_t read_n = fread(chunk_template_0x2c, 1, (size_t)size, fp);
+  fclose(fp);
+  if (read_n != (size_t)size) {
+    free(chunk_template_0x2c);
+    chunk_template_0x2c = NULL;
+    return;
+  }
+  if (chunk_template_0x2c[0] != 0x2C || size < 9) {
+    free(chunk_template_0x2c);
+    chunk_template_0x2c = NULL;
+    return;
+  }
+
+  chunk_template_0x2c_len = (size_t)size;
+  printf(
+    "Loaded notchian chunk template (0x2C), body_len=%zu from %s\n\n",
+    chunk_template_0x2c_len, path
+  );
+}
+
+static int readVarIntFromMemory (const uint8_t *data, size_t len, size_t *offset, uint32_t *value) {
+  uint32_t result = 0;
+  int shift = 0;
+  while (*offset < len && shift <= 28) {
+    uint8_t byte = data[(*offset)++];
+    result |= (uint32_t)(byte & 0x7F) << shift;
+    if (!(byte & 0x80)) {
+      *value = result;
+      return 0;
+    }
+    shift += 7;
+  }
+  return -1;
+}
+
+static void logPacketStreamSummary (const char *label, const uint8_t *data, size_t len) {
+  printf("%s stream summary (%zu bytes):\n", label, len);
+
+  size_t offset = 0;
+  int packet_index = 0;
+  while (offset < len) {
+    size_t length_offset = offset;
+    uint32_t packet_len = 0;
+    if (readVarIntFromMemory(data, len, &offset, &packet_len)) {
+      printf("  [%d] invalid packet length varint at offset %zu\n", packet_index, length_offset);
+      break;
+    }
+    if (offset + packet_len > len) {
+      printf(
+        "  [%d] invalid packet boundary: offset=%zu packet_len=%" PRIu32 " total=%zu\n",
+        packet_index, offset, packet_len, len
+      );
+      break;
+    }
+
+    size_t packet_start = offset;
+    uint32_t packet_id = 0;
+    if (readVarIntFromMemory(data, len, &offset, &packet_id) || offset > packet_start + packet_len) {
+      printf("  [%d] invalid packet id varint at payload offset %zu\n", packet_index, packet_start);
+      break;
+    }
+
+    printf(
+      "  [%d] id=0x%02" PRIX32 " payload=%" PRIu32 " packet_len=%" PRIu32 "\n",
+      packet_index, packet_id, (uint32_t)(packet_len - (offset - packet_start)), packet_len
+    );
+
+    offset = packet_start + packet_len;
+    packet_index ++;
+  }
+
+  if (offset == len) printf("  stream parse complete (%d packets)\n", packet_index);
+  printf("\n");
+}
+
+static void logRegistryDataDetails (const uint8_t *data, size_t len) {
+  size_t offset = 0;
+  int packet_index = 0;
+
+  while (offset < len) {
+    uint32_t packet_len = 0;
+    size_t packet_len_off = offset;
+    if (readVarIntFromMemory(data, len, &offset, &packet_len)) {
+      printf("  [registry:%d] invalid packet length at offset %zu\n", packet_index, packet_len_off);
+      return;
+    }
+    if (offset + packet_len > len) {
+      printf("  [registry:%d] packet overruns stream (off=%zu len=%" PRIu32 " total=%zu)\n", packet_index, offset, packet_len, len);
+      return;
+    }
+
+    size_t packet_end = offset + packet_len;
+    uint32_t packet_id = 0;
+    if (readVarIntFromMemory(data, packet_end, &offset, &packet_id)) {
+      printf("  [registry:%d] invalid packet id\n", packet_index);
+      return;
+    }
+    if (packet_id != 0x07) {
+      printf("  [registry:%d] unexpected packet id 0x%02" PRIX32 "\n", packet_index, packet_id);
+      offset = packet_end;
+      packet_index ++;
+      continue;
+    }
+
+    uint32_t registry_name_len = 0;
+    if (readVarIntFromMemory(data, packet_end, &offset, &registry_name_len) ||
+      offset + registry_name_len > packet_end
+    ) {
+      printf("  [registry:%d] invalid registry name\n", packet_index);
+      return;
+    }
+    const char *registry_name = (const char *)(data + offset);
+    int is_dimension_type =
+      registry_name_len == strlen("minecraft:dimension_type") &&
+      memcmp(registry_name, "minecraft:dimension_type", registry_name_len) == 0;
+    printf("  [registry:%d] name=%.*s\n", packet_index, (int)registry_name_len, registry_name);
+    offset += registry_name_len;
+
+    uint32_t entry_count = 0;
+    if (readVarIntFromMemory(data, packet_end, &offset, &entry_count)) {
+      printf("  [registry:%d] invalid entry count\n", packet_index);
+      return;
+    }
+    printf("    entries=%" PRIu32 "\n", entry_count);
+
+    for (uint32_t i = 0; i < entry_count; i ++) {
+      uint32_t entry_name_len = 0;
+      if (readVarIntFromMemory(data, packet_end, &offset, &entry_name_len) ||
+        offset + entry_name_len > packet_end
+      ) {
+        printf("    entry[%" PRIu32 "] invalid name\n", i);
+        return;
+      }
+      const char *entry_name = (const char *)(data + offset);
+      offset += entry_name_len;
+
+      if (offset >= packet_end) {
+        printf("    entry[%" PRIu32 "] missing data flag\n", i);
+        return;
+      }
+      uint8_t has_data = data[offset++];
+
+      if (i < 3) {
+        printf(
+          "    entry[%" PRIu32 "]=%.*s has_data=%u\n",
+          i, (int)entry_name_len, entry_name, has_data
+        );
+      }
+      if (is_dimension_type && has_data != 0) {
+        printf(
+          "    WARNING: dimension_type entry %.*s has_data=%u (expected 0/reference in current protocol)\n",
+          (int)entry_name_len, entry_name, has_data
+        );
+      }
+    }
+
+    if (entry_count > 3) printf("    ... %" PRIu32 " more entries\n", entry_count - 3);
+    if (offset != packet_end) {
+      printf("    WARNING: packet has %zu unread trailing bytes\n", packet_end - offset);
+      offset = packet_end;
+    }
+    packet_index ++;
+  }
+  printf("\n");
+}
+
+static size_t appendByte (uint8_t *out, size_t off, uint8_t v) {
+  out[off++] = v;
+  return off;
+}
+
+static size_t appendUint32BE (uint8_t *out, size_t off, uint32_t v) {
+  out[off++] = (uint8_t)((v >> 24) & 0xFF);
+  out[off++] = (uint8_t)((v >> 16) & 0xFF);
+  out[off++] = (uint8_t)((v >> 8) & 0xFF);
+  out[off++] = (uint8_t)(v & 0xFF);
+  return off;
+}
+
+static size_t appendUint64BE (uint8_t *out, size_t off, uint64_t v) {
+  out[off++] = (uint8_t)((v >> 56) & 0xFF);
+  out[off++] = (uint8_t)((v >> 48) & 0xFF);
+  out[off++] = (uint8_t)((v >> 40) & 0xFF);
+  out[off++] = (uint8_t)((v >> 32) & 0xFF);
+  out[off++] = (uint8_t)((v >> 24) & 0xFF);
+  out[off++] = (uint8_t)((v >> 16) & 0xFF);
+  out[off++] = (uint8_t)((v >> 8) & 0xFF);
+  out[off++] = (uint8_t)(v & 0xFF);
+  return off;
+}
+
+static size_t appendVarInt (uint8_t *out, size_t off, uint32_t v) {
+  while (true) {
+    if ((v & ~0x7FU) == 0) {
+      out[off++] = (uint8_t)v;
+      return off;
+    }
+    out[off++] = (uint8_t)((v & 0x7F) | 0x80);
+    v >>= 7;
+  }
+}
+
+static void dumpHex (const char *label, const uint8_t *buf, size_t len) {
+  printf("%s (%zu bytes)\n", label, len);
+  for (size_t i = 0; i < len; i += 16) {
+    printf("  %04zx: ", i);
+    size_t row_end = i + 16;
+    if (row_end > len) row_end = len;
+    for (size_t j = i; j < row_end; j ++) printf("%02X ", buf[j]);
+    printf("\n");
+  }
+  printf("\n");
+}
+
 // S->C Status Response (server list ping)
 int sc_statusResponse (int client_fd) {
 
   char header[] = "{"
-    "\"version\":{\"name\":\"1.21.8\",\"protocol\":772},"
+    "\"version\":{\"name\":\"1.21.11\",\"protocol\":774},"
     "\"description\":{\"text\":\"";
   char footer[] = "\"}}";
 
@@ -168,11 +433,28 @@ int sc_knownPacks (int client_fd) {
   char known_packs[] = {
     0x0e, 0x01, 0x09, 0x6d, 0x69, 0x6e,
     0x65, 0x63, 0x72, 0x61, 0x66, 0x74, 0x04, 0x63,
-    0x6f, 0x72, 0x65, 0x06, 0x31, 0x2e, 0x32, 0x31,
-    0x2e, 0x38
+    0x6f, 0x72, 0x65, 0x07, 0x31, 0x2e, 0x32, 0x31,
+    0x2e, 0x31, 0x31
   };
-  writeVarInt(client_fd, 24);
-  send_all(client_fd, &known_packs, 24);
+  writeVarInt(client_fd, 25);
+  send_all(client_fd, &known_packs, 25);
+  return 0;
+}
+
+// S->C Update Enabled Features (configuration)
+int sc_updateEnabledFeatures (int client_fd) {
+  static const char feature_vanilla[] = "minecraft:vanilla";
+  int feature_len = (int)strlen(feature_vanilla);
+
+  printf("Sending Update Enabled Features\n");
+  printf("  [0] %s\n\n", feature_vanilla);
+
+  // packet id + feature count + string length + string bytes
+  writeVarInt(client_fd, 1 + 1 + sizeVarInt(feature_len) + feature_len);
+  writeVarInt(client_fd, 0x0C);
+  writeVarInt(client_fd, 1);
+  writeVarInt(client_fd, feature_len);
+  send_all(client_fd, feature_vanilla, feature_len);
   return 0;
 }
 
@@ -188,6 +470,42 @@ int cs_pluginMessage (int client_fd) {
     printf("  Brand: \"%s\"\n", recv_buffer);
   }
   printf("\n");
+  return 0;
+}
+
+int cs_knownPacks (int client_fd, int payload_len) {
+  uint64_t start_bytes = total_bytes_received;
+  int count = readVarInt(client_fd);
+  if (recv_count == -1) return 1;
+
+  printf("Received Client's Known Packs\n");
+  printf("  Entry count: %d\n", count);
+
+  for (int i = 0; i < count; i ++) {
+    readString(client_fd);
+    if (recv_count == -1) return 1;
+    printf("  [%d] Namespace: %s\n", i, recv_buffer);
+
+    readString(client_fd);
+    if (recv_count == -1) return 1;
+    printf("  [%d] ID: %s\n", i, recv_buffer);
+
+    readString(client_fd);
+    if (recv_count == -1) return 1;
+    printf("  [%d] Version: %s\n", i, recv_buffer);
+  }
+
+  uint64_t consumed = total_bytes_received - start_bytes;
+  if ((int)consumed < payload_len) {
+    size_t trailing = (size_t)(payload_len - consumed);
+    printf("  WARNING: %zu trailing bytes left in known packs payload, discarding\n", trailing);
+    discard_all(client_fd, trailing, false);
+  } else if ((int)consumed > payload_len) {
+    printf("  WARNING: Known packs parser consumed %" PRIu64 " bytes, expected payload_len=%d\n", consumed, payload_len);
+  }
+
+  printf("  Parsed payload bytes: %" PRIu64 " (expected %d)\n", consumed, payload_len);
+  printf("  Finishing configuration\n\n");
   return 0;
 }
 
@@ -210,6 +528,7 @@ int sc_sendPluginMessage (int client_fd, const char *channel, const uint8_t *dat
 
 // S->C Finish Configuration
 int sc_finishConfiguration (int client_fd) {
+  printf("Sending Finish Configuration (packet id 0x03)\n\n");
   writeVarInt(client_fd, 1);
   writeVarInt(client_fd, 0x03);
   return 0;
@@ -217,17 +536,100 @@ int sc_finishConfiguration (int client_fd) {
 
 // S->C Login (play)
 int sc_loginPlay (int client_fd) {
+  const char *spawn_dimension = "minecraft:overworld";
+  const char *dimensions[] = {
+    "minecraft:overworld",
+    "minecraft:the_nether",
+    "minecraft:the_end"
+  };
+  int dimension_count = (int)(sizeof(dimensions) / sizeof(dimensions[0]));
+  int spawn_dimension_len = (int)strlen(spawn_dimension);
+  int dimensions_len = 0;
+  for (int i = 0; i < dimension_count; i ++) {
+    int len = (int)strlen(dimensions[i]);
+    dimensions_len += sizeVarInt(len) + len;
+  }
+  int common_spawn_info_len =
+    sizeVarInt(0) +
+    sizeVarInt(spawn_dimension_len) + spawn_dimension_len +
+    8 +
+    1 + 1 +
+    1 + 1 +
+    1 +
+    sizeVarInt(0) +
+    sizeVarInt(63);
+  int payload_len =
+    4 +
+    1 +
+    sizeVarInt(dimension_count) +
+    dimensions_len +
+    sizeVarInt(MAX_PLAYERS) +
+    sizeVarInt(VIEW_DISTANCE) +
+    sizeVarInt(VIEW_DISTANCE) +
+    1 + 1 + 1 +
+    common_spawn_info_len +
+    1;
+  int framed_len = payload_len + 1;
 
-  writeVarInt(client_fd, 47 + sizeVarInt(MAX_PLAYERS) + sizeVarInt(VIEW_DISTANCE) * 2);
-  writeByte(client_fd, 0x2B);
+  // 1.21.11 play/clientbound "login" packet id is 0x30.
+  // Payload layout follows ClientboundLoginPacket + CommonPlayerSpawnInfo.
+  printf("Sending Play Login (packet id 0x30, length %d)\n", framed_len);
+  printf("  Spawn dimension key: %s, dimensionTypeHolderId=%d\n", spawn_dimension, 0);
+  printf("  Breakdown: commonSpawnInfo=%d, payload=%d, framed=%d\n\n", common_spawn_info_len, payload_len, framed_len);
+
+  uint8_t login_dbg[256];
+  size_t off = 0;
+  off = appendVarInt(login_dbg, off, (uint32_t)framed_len);
+  off = appendByte(login_dbg, off, 0x30);
+  off = appendUint32BE(login_dbg, off, (uint32_t)client_fd);
+  off = appendByte(login_dbg, off, false);
+  off = appendVarInt(login_dbg, off, (uint32_t)dimension_count);
+  for (int i = 0; i < dimension_count; i ++) {
+    int len = (int)strlen(dimensions[i]);
+    off = appendVarInt(login_dbg, off, (uint32_t)len);
+    memcpy(login_dbg + off, dimensions[i], (size_t)len);
+    off += (size_t)len;
+  }
+  off = appendVarInt(login_dbg, off, MAX_PLAYERS);
+  off = appendVarInt(login_dbg, off, VIEW_DISTANCE);
+  off = appendVarInt(login_dbg, off, VIEW_DISTANCE);
+  off = appendByte(login_dbg, off, 0);
+  off = appendByte(login_dbg, off, true);
+  off = appendByte(login_dbg, off, false);
+  off = appendVarInt(login_dbg, off, 0);
+  off = appendVarInt(login_dbg, off, (uint32_t)spawn_dimension_len);
+  memcpy(login_dbg + off, spawn_dimension, (size_t)spawn_dimension_len);
+  off += (size_t)spawn_dimension_len;
+  off = appendUint64BE(login_dbg, off, 0x0123456789ABCDEFULL);
+  off = appendByte(login_dbg, off, GAMEMODE);
+  off = appendByte(login_dbg, off, 0xFF);
+  off = appendByte(login_dbg, off, 0);
+  off = appendByte(login_dbg, off, 0);
+  off = appendByte(login_dbg, off, 0);
+  off = appendVarInt(login_dbg, off, 0);
+  off = appendVarInt(login_dbg, off, 63);
+  off = appendByte(login_dbg, off, false);
+  dumpHex("Play Login bytes", login_dbg, off);
+  if ((int)off != framed_len + sizeVarInt(framed_len)) {
+    printf(
+      "WARNING: Play Login debug frame size mismatch: expected total=%d got=%zu\n\n",
+      framed_len + sizeVarInt(framed_len), off
+    );
+  }
+
+  writeVarInt(client_fd, framed_len);
+  writeByte(client_fd, 0x30);
   // Entity id
   writeUint32(client_fd, client_fd);
   // Hardcore
   writeByte(client_fd, false);
   // Dimensions
-  writeVarInt(client_fd, 1);
-  writeVarInt(client_fd, 9);
-  send_all(client_fd, "overworld", 9);
+  writeVarInt(client_fd, dimension_count);
+  for (int i = 0; i < dimension_count; i ++) {
+    int len = (int)strlen(dimensions[i]);
+    writeVarInt(client_fd, len);
+    send_all(client_fd, dimensions[i], len);
+  }
   // Maxplayers
   writeVarInt(client_fd, MAX_PLAYERS);
   // View distance
@@ -240,8 +642,10 @@ int sc_loginPlay (int client_fd) {
   writeByte(client_fd, true);
   // Limited crafting
   writeByte(client_fd, false);
-  // Dimension/game context.
-  writeOverworldContext(client_fd, 0);
+  // CommonPlayerSpawnInfo.
+  writeOverworldContext(client_fd);
+  // enforcesSecureChat
+  writeByte(client_fd, false);
 
   return 0;
 
@@ -251,7 +655,8 @@ int sc_loginPlay (int client_fd) {
 int sc_synchronizePlayerPosition (int client_fd, double x, double y, double z, float yaw, float pitch) {
 
   writeVarInt(client_fd, 61 + sizeVarInt(-1));
-  writeByte(client_fd, 0x41);
+  // 1.21.11: play/clientbound player_position
+  writeByte(client_fd, 0x46);
 
   // Teleport ID
   writeVarInt(client_fd, -1);
@@ -278,13 +683,27 @@ int sc_synchronizePlayerPosition (int client_fd, double x, double y, double z, f
 }
 
 // S->C Set Default Spawn Position
-int sc_setDefaultSpawnPosition (int client_fd, int64_t x, int64_t y, int64_t z) {
+int sc_setDefaultSpawnPosition (int client_fd, const char *dimension, int64_t x, int64_t y, int64_t z, float yaw, float pitch) {
 
-  writeVarInt(client_fd, sizeVarInt(0x5A) + 12);
-  writeVarInt(client_fd, 0x5A);
+  // 1.21.11: play/clientbound set_default_spawn_position
+  int dimension_len = (int)strlen(dimension);
+  int payload_len = sizeVarInt(dimension_len) + dimension_len + 8 + 4 + 4;
+  writeVarInt(client_fd, sizeVarInt(0x5F) + payload_len);
+  writeVarInt(client_fd, 0x5F);
 
-  writeUint64(client_fd, ((x & 0x3FFFFFF) << 38) | ((z & 0x3FFFFFF) << 12) | (y & 0xFFF));
-  writeFloat(client_fd, 0);
+  uint64_t packed_pos =
+    (((uint64_t)x & 0x3FFFFFFULL) << 38) |
+    (((uint64_t)z & 0x3FFFFFFULL) << 12) |
+    ((uint64_t)y & 0xFFFULL);
+  printf(
+    "Sending Set Default Spawn Position (packet id 0x5F, dim=%s x=%lld y=%lld z=%lld yaw=%.2f pitch=%.2f packed=0x%016llX)\n\n",
+    dimension, (long long)x, (long long)y, (long long)z, yaw, pitch, (unsigned long long)packed_pos
+  );
+  writeVarInt(client_fd, dimension_len);
+  send_all(client_fd, dimension, dimension_len);
+  writeUint64(client_fd, packed_pos);
+  writeFloat(client_fd, yaw);
+  writeFloat(client_fd, pitch);
 
   return 0;
 }
@@ -293,7 +712,8 @@ int sc_setDefaultSpawnPosition (int client_fd, int64_t x, int64_t y, int64_t z) 
 int sc_playerAbilities (int client_fd, uint8_t flags) {
 
   writeVarInt(client_fd, 10);
-  writeByte(client_fd, 0x39);
+  // 1.21.11: play/clientbound player_abilities
+  writeByte(client_fd, 0x3E);
 
   writeByte(client_fd, flags);
   writeFloat(client_fd, 0.05f);
@@ -306,7 +726,8 @@ int sc_playerAbilities (int client_fd, uint8_t flags) {
 int sc_updateTime (int client_fd, uint64_t ticks) {
 
   writeVarInt(client_fd, 18);
-  writeVarInt(client_fd, 0x6A);
+  // 1.21.11: play/clientbound set_time
+  writeVarInt(client_fd, 0x6F);
 
   uint64_t world_age = get_program_time() / 50000;
   writeUint64(client_fd, world_age);
@@ -319,7 +740,8 @@ int sc_updateTime (int client_fd, uint64_t ticks) {
 // S->C Game Event 13 (Start waiting for level chunks)
 int sc_startWaitingForChunks (int client_fd) {
   writeVarInt(client_fd, 6);
-  writeByte(client_fd, 0x22);
+  // 1.21.11: play/clientbound game_event
+  writeByte(client_fd, 0x26);
   writeByte(client_fd, 13);
   writeUint32(client_fd, 0);
   return 0;
@@ -328,7 +750,8 @@ int sc_startWaitingForChunks (int client_fd) {
 // S->C Set Center Chunk
 int sc_setCenterChunk (int client_fd, int x, int y) {
   writeVarInt(client_fd, 1 + sizeVarInt(x) + sizeVarInt(y));
-  writeByte(client_fd, 0x57);
+  // 1.21.11: play/clientbound set_chunk_cache_center
+  writeByte(client_fd, 0x5C);
   writeVarInt(client_fd, x);
   writeVarInt(client_fd, y);
   return 0;
@@ -336,13 +759,46 @@ int sc_setCenterChunk (int client_fd, int x, int y) {
 
 // S->C Chunk Data and Update Light
 int sc_chunkDataAndUpdateLight (int client_fd, int _x, int _z) {
+  tryLoadChunkTemplate0x2c();
+  if (chunk_template_0x2c != NULL) {
+    uint8_t *body = malloc(chunk_template_0x2c_len);
+    if (body == NULL) return 1;
+    memcpy(body, chunk_template_0x2c, chunk_template_0x2c_len);
+    // Packet body layout starts with: id(0x2C), chunk_x(i32), chunk_z(i32)
+    writeInt32BE(body + 1, _x);
+    writeInt32BE(body + 5, _z);
+
+    static uint8_t logged_once = false;
+    if (!logged_once) {
+      printf(
+        "Chunk encoder v6: using notchian 0x2C template, body_len=%zu\n\n",
+        chunk_template_0x2c_len
+      );
+      logged_once = true;
+    }
+
+    writeVarInt(client_fd, (uint32_t)chunk_template_0x2c_len);
+    send_all(client_fd, body, (ssize_t)chunk_template_0x2c_len);
+    free(body);
+    return 0;
+  }
+
   initSkyLightBuffers();
 
   const int chunk_data_size = (4101 + sizeVarInt(256) + sizeof(network_block_palette)) * 20 + 6 * 12;
   const int light_data_size = 14 + (sizeVarInt(2048) + 2048) * 26;
+  static uint8_t logged_once = false;
+  if (!logged_once) {
+    printf(
+      "Chunk encoder v5: packet_id=0x2C body_len=%d chunk_data_size=%d (legacy-large)\n\n",
+      11 + sizeVarInt(chunk_data_size) + chunk_data_size + light_data_size, chunk_data_size
+    );
+    logged_once = true;
+  }
 
   writeVarInt(client_fd, 11 + sizeVarInt(chunk_data_size) + chunk_data_size + light_data_size);
-  writeByte(client_fd, 0x27);
+  // 1.21.11: play/clientbound level_chunk_with_light
+  writeByte(client_fd, 0x2C);
 
   writeUint32(client_fd, _x);
   writeUint32(client_fd, _z);
@@ -361,7 +817,6 @@ int sc_chunkDataAndUpdateLight (int client_fd, int _x, int _z) {
     writeByte(client_fd, 0); // Biome bits
     writeByte(client_fd, 0); // Biome palette
   }
-  // Yield to idle task
   task_yield();
 
   // Send chunk sections
@@ -370,15 +825,11 @@ int sc_chunkDataAndUpdateLight (int client_fd, int _x, int _z) {
     writeUint16(client_fd, 4096); // Block count
     writeByte(client_fd, 8); // Bits per entry
     writeVarInt(client_fd, 256); // Block palette length
-    // Block palette as varint buffer
     send_all(client_fd, network_block_palette, sizeof(network_block_palette));
-    // Chunk section buffer
     uint8_t biome = buildChunkSection(x, y, z);
     send_all(client_fd, chunk_section, 4096);
-    // Biome data
     writeByte(client_fd, 0); // Bits per entry
     writeByte(client_fd, biome); // Biome palette
-    // Yield to idle task
     task_yield();
   }
 
@@ -390,8 +841,6 @@ int sc_chunkDataAndUpdateLight (int client_fd, int _x, int _z) {
     writeByte(client_fd, 0); // Biome bits
     writeByte(client_fd, 0); // Biome palette
   }
-  // Yield to idle task
-  task_yield();
 
   writeVarInt(client_fd, 0); // Omit block entities
 
@@ -403,7 +852,7 @@ int sc_chunkDataAndUpdateLight (int client_fd, int _x, int _z) {
   writeVarInt(client_fd, 0);
 
   // Sky light array
-  writeVarInt(client_fd, 26);
+  writeVarInt(client_fd, 28);
   for (int i = 0; i < 8; i ++) {
     writeVarInt(client_fd, 2048);
     send_all(client_fd, sky_light_dark, 2048);
@@ -438,7 +887,7 @@ int sc_chunkDataAndUpdateLight (int client_fd, int _x, int _z) {
 int sc_keepAlive (int client_fd) {
 
   writeVarInt(client_fd, 9);
-  writeByte(client_fd, 0x26);
+  writeByte(client_fd, 0x2B);
 
   writeUint64(client_fd, 0);
 
@@ -517,7 +966,8 @@ int cs_playerAction (int client_fd) {
 int sc_openScreen (int client_fd, uint8_t window, const char *title, uint16_t length) {
 
   writeVarInt(client_fd, 1 + 2 * sizeVarInt(window) + 1 + 2 + length);
-  writeByte(client_fd, 0x34);
+  // 1.21.11: play/clientbound open_screen
+  writeByte(client_fd, 0x39);
 
   writeVarInt(client_fd, window);
   writeVarInt(client_fd, window);
@@ -712,7 +1162,8 @@ int cs_clickContainer (int client_fd) {
 int sc_setCursorItem (int client_fd, uint16_t item, uint8_t count) {
 
   writeVarInt(client_fd, 1 + sizeVarInt(count) + (count != 0 ? sizeVarInt(item) + 2 : 0));
-  writeByte(client_fd, 0x59);
+  // 1.21.11: play/clientbound set_cursor_item
+  writeByte(client_fd, 0x5E);
 
   writeVarInt(client_fd, count);
   if (count == 0) return 0;
@@ -824,8 +1275,9 @@ int cs_setHeldItem (int client_fd) {
 // S->C Set Held Item (clientbound)
 int sc_setHeldItem (int client_fd, uint8_t slot) {
 
-  writeVarInt(client_fd, sizeVarInt(0x62) + 1);
-  writeVarInt(client_fd, 0x62);
+  // 1.21.11: play/clientbound set_held_slot
+  writeVarInt(client_fd, sizeVarInt(0x67) + 1);
+  writeVarInt(client_fd, 0x67);
 
   writeByte(client_fd, slot);
 
@@ -866,7 +1318,8 @@ int cs_closeContainer (int client_fd) {
 int sc_playerInfoUpdateAddPlayer (int client_fd, PlayerData player) {
 
   writeVarInt(client_fd, 21 + strlen(player.name)); // Packet length
-  writeByte(client_fd, 0x3F); // Packet ID
+  // 1.21.11: play/clientbound player_info_update
+  writeByte(client_fd, 0x44); // Packet ID
 
   writeByte(client_fd, 0x01); // EnumSet: Add Player
   writeByte(client_fd, 1); // Player count (1 per packet)
@@ -924,7 +1377,8 @@ int sc_setEntityMetadata (int client_fd, int id, EntityData *metadata, size_t le
   if (entity_metadata_size == -1) return 1;
 
   writeVarInt(client_fd, 2 + sizeVarInt(id) + entity_metadata_size);
-  writeByte(client_fd, 0x5C);
+  // 1.21.11: play/clientbound set_entity_data
+  writeByte(client_fd, 0x61);
 
   writeVarInt(client_fd, id); // Entity ID
 
@@ -970,7 +1424,8 @@ int sc_teleportEntity (
 
   // Packet length and ID
   writeVarInt(client_fd, 58 + sizeVarInt(id));
-  writeByte(client_fd, 0x1F);
+  // 1.21.11: play/clientbound teleport_entity
+  writeByte(client_fd, 0x7B);
 
   // Entity ID
   writeVarInt(client_fd, id);
@@ -996,7 +1451,8 @@ int sc_setHeadRotation (int client_fd, int id, uint8_t yaw) {
 
   // Packet length and ID
   writeByte(client_fd, 2 + sizeVarInt(id));
-  writeByte(client_fd, 0x4C);
+  // 1.21.11: play/clientbound rotate_head
+  writeByte(client_fd, 0x51);
   // Entity ID
   writeVarInt(client_fd, id);
   // Head yaw
@@ -1010,7 +1466,8 @@ int sc_updateEntityRotation (int client_fd, int id, uint8_t yaw, uint8_t pitch) 
 
   // Packet length and ID
   writeByte(client_fd, 4 + sizeVarInt(id));
-  writeByte(client_fd, 0x31);
+  // 1.21.11: play/clientbound move_entity_rot
+  writeByte(client_fd, 0x36);
   // Entity ID
   writeVarInt(client_fd, id);
   // Angles
@@ -1041,7 +1498,8 @@ int sc_damageEvent (int client_fd, int entity_id, int type) {
 int sc_setHealth (int client_fd, uint8_t health, uint8_t food, uint16_t saturation) {
 
   writeVarInt(client_fd, 9 + sizeVarInt(food));
-  writeByte(client_fd, 0x61);
+  // 1.21.11: play/clientbound set_health
+  writeByte(client_fd, 0x66);
 
   writeFloat(client_fd, (float)health);
   writeVarInt(client_fd, food);
@@ -1052,12 +1510,26 @@ int sc_setHealth (int client_fd, uint8_t health, uint8_t food, uint16_t saturati
 
 // S->C Respawn
 int sc_respawn (int client_fd) {
+  const char *dimension = "minecraft:overworld";
+  int dimension_len = (int)strlen(dimension);
+  int common_spawn_info_len =
+    sizeVarInt(1) +
+    sizeVarInt(dimension_len) + dimension_len +
+    8 +
+    1 + 1 +
+    1 + 1 +
+    1 +
+    sizeVarInt(0) +
+    sizeVarInt(63);
 
-  writeVarInt(client_fd, 28);
-  writeByte(client_fd, 0x4B);
+  writeVarInt(client_fd, common_spawn_info_len + 2);
+  // 1.21.11: play/clientbound respawn
+  writeByte(client_fd, 0x50);
 
   // Dimension/game context.
-  writeOverworldContext(client_fd, 0);
+  writeOverworldContext(client_fd);
+  // Keep data mask (none)
+  writeByte(client_fd, 0);
 
   return 0;
 }
@@ -1083,7 +1555,8 @@ int cs_clientStatus (int client_fd) {
 int sc_systemChat (int client_fd, char* message, uint16_t len) {
 
   writeVarInt(client_fd, 5 + len);
-  writeByte(client_fd, 0x72);
+  // 1.21.11: play/clientbound system_chat
+  writeByte(client_fd, 0x77);
 
   // String NBT tag
   writeByte(client_fd, 8);
@@ -1245,7 +1718,8 @@ int cs_interact (int client_fd) {
 int sc_entityEvent (int client_fd, int entity_id, uint8_t status) {
 
   writeVarInt(client_fd, 6);
-  writeByte(client_fd, 0x1E);
+  // 1.21.11: play/clientbound entity_event
+  writeByte(client_fd, 0x22);
 
   writeUint32(client_fd, entity_id);
   writeByte(client_fd, status);
@@ -1257,7 +1731,8 @@ int sc_entityEvent (int client_fd, int entity_id, uint8_t status) {
 int sc_removeEntity (int client_fd, int entity_id) {
 
   writeVarInt(client_fd, 2 + sizeVarInt(entity_id));
-  writeByte(client_fd, 0x46);
+  // 1.21.11: play/clientbound remove_entities
+  writeByte(client_fd, 0x4B);
 
   writeByte(client_fd, 1);
   writeVarInt(client_fd, entity_id);
@@ -1305,7 +1780,8 @@ int cs_playerCommand (int client_fd) {
 int sc_pickupItem (int client_fd, int collected, int collector, uint8_t count) {
 
   writeVarInt(client_fd, 1 + sizeVarInt(collected) + sizeVarInt(collector) + sizeVarInt(count));
-  writeByte(client_fd, 0x75);
+  // 1.21.11: play/clientbound take_item_entity
+  writeByte(client_fd, 0x7A);
 
   writeVarInt(client_fd, collected);
   writeVarInt(client_fd, collector);
@@ -1326,13 +1802,35 @@ int cs_playerLoaded (int client_fd) {
   return 0;
 }
 
+// C->S Accept Teleportation
+int cs_acceptTeleportation (int client_fd) {
+  int teleport_id = readVarInt(client_fd);
+  printf("Play RX: accept_teleportation id=%d\n", teleport_id);
+  return 0;
+}
+
+// C->S Chunk Batch Received
+int cs_chunkBatchReceived (int client_fd) {
+  float desired = readFloat(client_fd);
+  printf("Play RX: chunk_batch_received desiredChunksPerTick=%.2f\n", desired);
+  return 0;
+}
+
 // S->C Registry Data (multiple packets) and Update Tags (configuration, multiple packets)
 int sc_registries (int client_fd) {
 
-  printf("Sending Registries\n\n");
+  printf("Sending Registries (%zu bytes)\n\n", sizeof(registries_bin));
+  #ifdef DEBUG_REGISTRY_VERBOSE
+    logPacketStreamSummary("Registries", registries_bin, sizeof(registries_bin));
+    printf("Registries detailed decode:\n");
+    logRegistryDataDetails(registries_bin, sizeof(registries_bin));
+  #endif
   send_all(client_fd, registries_bin, sizeof(registries_bin));
 
-  printf("Sending Tags\n\n");
+  printf("Sending Tags (%zu bytes)\n\n", sizeof(tags_bin));
+  #ifdef DEBUG_REGISTRY_VERBOSE
+    logPacketStreamSummary("Tags", tags_bin, sizeof(tags_bin));
+  #endif
   send_all(client_fd, tags_bin, sizeof(tags_bin));
 
   return 0;

@@ -159,12 +159,8 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
         if (sc_loginSuccess(client_fd, uuid, name)) break;
       } else if (state == STATE_CONFIGURATION) {
         if (cs_clientInformation(client_fd)) break;
-        if (sc_knownPacks(client_fd)) break;
-        if (sc_registries(client_fd)) break;
-
-        #ifdef SEND_BRAND
-        if (sc_sendPluginMessage(client_fd, "minecraft:brand", (uint8_t *)brand, brand_len)) break;
-        #endif
+      } else if (state == STATE_PLAY) {
+        cs_acceptTeleportation(client_fd);
       }
       break;
 
@@ -174,7 +170,8 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
         writeByte(client_fd, 9);
         writeByte(client_fd, 0x01);
         writeUint64(client_fd, readUint64(client_fd));
-        recv_count = 0;
+        // Mark intentional close after status pong.
+        recv_count = -2;
         return;
       }
       break;
@@ -187,12 +184,22 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
       if (state == STATE_LOGIN) {
         printf("Client Acknowledged Login\n\n");
         setClientState(client_fd, STATE_CONFIGURATION);
+        #ifdef SEND_BRAND
+        if (sc_sendPluginMessage(client_fd, "minecraft:brand", (uint8_t *)brand, brand_len)) break;
+        #endif
+        if (sc_updateEnabledFeatures(client_fd)) break;
+        if (sc_knownPacks(client_fd)) break;
       } else if (state == STATE_CONFIGURATION) {
         printf("Client Acknowledged Configuration\n\n");
+        printf("Transitioning client %d to PLAY; sending initial play packets\n\n", client_fd);
 
         // Promote client to PLAY and send initial world/player state.
         setClientState(client_fd, STATE_PLAY);
         sc_loginPlay(client_fd);
+        #ifdef DEBUG_LOGIN_ONLY
+          printf("DEBUG_LOGIN_ONLY active: not sending spawn/chunk packets after Play Login\n\n");
+          break;
+        #endif
 
         PlayerData *player;
         if (getPlayerData(client_fd, &player)) break;
@@ -227,8 +234,9 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
 
     case 0x07:
       if (state == STATE_CONFIGURATION) {
-        printf("Received Client's Known Packs\n");
-        printf("  Finishing configuration\n\n");
+        if (cs_knownPacks(client_fd, length)) break;
+        printf("Sending required Registry/Tags transfer for PLAY login holder decoding\n\n");
+        if (sc_registries(client_fd)) break;
         sc_finishConfiguration(client_fd);
       }
       break;
@@ -242,6 +250,10 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
       break;
 
     case 0x0C: // Client tick (unused).
+      break;
+
+    case 0x0A:
+      if (state == STATE_PLAY) cs_chunkBatchReceived(client_fd);
       break;
 
     case 0x11:
@@ -537,11 +549,9 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
   }
 
   #ifdef DEV_LOG_LENGTH_DISCREPANCY
-  if (processed_length != 0) {
-    printf("WARNING: Packet 0x");
-    if (packet_id < 16) printf("0");
-    printf("%X parsed incorrectly!\n  Expected: %d, parsed: %d\n\n", packet_id, length, processed_length);
-  }
+  printf("WARNING: Packet 0x");
+  if (packet_id < 16) printf("0");
+  printf("%X parsed incorrectly!\n  Expected: %d, parsed: %d\n\n", packet_id, length, processed_length);
   #endif
   #ifdef DEV_LOG_UNKNOWN_PACKETS
   if (processed_length == 0) {
@@ -551,6 +561,36 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
   }
   #endif
 
+}
+
+static const char *stateName (int state) {
+  switch (state) {
+    case STATE_NONE: return "none";
+    case STATE_STATUS: return "status";
+    case STATE_LOGIN: return "login";
+    case STATE_TRANSFER: return "transfer";
+    case STATE_CONFIGURATION: return "configuration";
+    case STATE_PLAY: return "play";
+    default: return "unknown";
+  }
+}
+
+static void logDisconnectContext (
+  const char *where, int client_fd, int cause, int state, int length, int packet_id, ssize_t recv_result
+) {
+#ifdef _WIN32
+  int socket_errno = WSAGetLastError();
+  printf(
+    "Disconnect context (%s): fd=%d cause=%d state=%d(%s) length=%d packet_id=%d recv=%zd wsa=%d\n",
+    where, client_fd, cause, state, stateName(state), length, packet_id, recv_result, socket_errno
+  );
+#else
+  int socket_errno = errno;
+  printf(
+    "Disconnect context (%s): fd=%d cause=%d state=%d(%s) length=%d packet_id=%d recv=%zd errno=%d (%s)\n",
+    where, client_fd, cause, state, stateName(state), length, packet_id, recv_result, socket_errno, strerror(socket_errno)
+  );
+#endif
 }
 
 int main () {
@@ -627,6 +667,7 @@ int main () {
     exit(EXIT_FAILURE);
   }
   printf("Server listening on port %d...\n", PORT);
+  printf("Build marker: chunk-v6-template-0x2c\n");
 
   // Use non-blocking I/O to avoid stalling the main loop.
   #ifdef _WIN32
@@ -691,11 +732,15 @@ int main () {
 
     // Process one packet from selected client.
     int client_fd = clients[client_index];
+    int state = getClientState(client_fd);
+    int length = -1;
+    int packet_id = -1;
 
     // Ensure at least two bytes are available before parsing VarInts.
     #ifdef _WIN32
     recv_count = recv(client_fd, recv_buffer, 2, MSG_PEEK);
     if (recv_count == 0) {
+      logDisconnectContext("peek", client_fd, 1, state, length, packet_id, recv_count);
       disconnectClient(&clients[client_index], 1);
       continue;
     }
@@ -704,6 +749,7 @@ int main () {
       if (err == WSAEWOULDBLOCK) {
         continue; // No data yet, keep client alive.
       } else {
+        logDisconnectContext("peek", client_fd, 1, state, length, packet_id, recv_count);
         disconnectClient(&clients[client_index], 1);
         continue;
       }
@@ -712,6 +758,7 @@ int main () {
     recv_count = recv(client_fd, &recv_buffer, 2, MSG_PEEK);
     if (recv_count < 2) {
       if (recv_count == 0 || (recv_count < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+        logDisconnectContext("peek", client_fd, 1, state, length, packet_id, recv_count);
         disconnectClient(&clients[client_index], 1);
       }
       continue;
@@ -753,28 +800,47 @@ int main () {
     #endif
 
     // Parse packet length.
-    int length = readVarInt(client_fd);
+    length = readVarInt(client_fd);
     if (length == VARNUM_ERROR) {
+      logDisconnectContext("read-length-varint", client_fd, 2, state, length, packet_id, recv_count);
       disconnectClient(&clients[client_index], 2);
       continue;
     }
     // Parse packet ID.
-    int packet_id = readVarInt(client_fd);
+    packet_id = readVarInt(client_fd);
     if (packet_id == VARNUM_ERROR) {
+      logDisconnectContext("read-packet-id-varint", client_fd, 3, state, length, packet_id, recv_count);
       disconnectClient(&clients[client_index], 3);
       continue;
     }
-    // Lookup current protocol state.
-    int state = getClientState(client_fd);
+    // State may have changed since peek in rare cases.
+    state = getClientState(client_fd);
+    if (state == STATE_CONFIGURATION) {
+      printf(
+        "Configuration RX: fd=%d packet=0x%02X length=%d payload=%d\n",
+        client_fd, packet_id, length, length - sizeVarInt(packet_id)
+      );
+    } else if (state == STATE_PLAY) {
+      printf(
+        "Play RX: fd=%d packet=0x%02X length=%d payload=%d\n",
+        client_fd, packet_id, length, length - sizeVarInt(packet_id)
+      );
+    }
     // Reject legacy list ping probe.
     if (state == STATE_NONE && length == 254 && packet_id == 122) {
+      logDisconnectContext("legacy-list-ping", client_fd, 5, state, length, packet_id, recv_count);
       disconnectClient(&clients[client_index], 5);
       continue;
     }
     // Dispatch packet payload.
     handlePacket(client_fd, length - sizeVarInt(packet_id), packet_id, state);
     flush_all_send_buffers();
+    if (recv_count == -2) {
+      disconnectClient(&clients[client_index], 8);
+      continue;
+    }
     if (recv_count == 0 || (recv_count == -1 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+      logDisconnectContext("post-handle", client_fd, 4, state, length, packet_id, recv_count);
       disconnectClient(&clients[client_index], 4);
       continue;
     }

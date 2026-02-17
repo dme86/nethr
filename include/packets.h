@@ -6,6 +6,7 @@ int cs_handshake (int client_fd);
 int cs_loginStart (int client_fd, uint8_t *uuid, char *name);
 int cs_clientInformation (int client_fd);
 int cs_pluginMessage (int client_fd);
+int cs_knownPacks (int client_fd, int payload_len);
 int cs_playerAction (int client_fd);
 int cs_useItemOn (int client_fd);
 int cs_useItem (int client_fd);
@@ -23,16 +24,19 @@ int cs_interact (int client_fd);
 int cs_playerInput (int client_fd);
 int cs_playerCommand (int client_fd);
 int cs_playerLoaded (int client_fd);
+int cs_acceptTeleportation (int client_fd);
+int cs_chunkBatchReceived (int client_fd);
 
 // Clientbound packets
 int sc_statusResponse (int client_fd);
 int sc_loginSuccess (int client_fd, uint8_t *uuid, char *name);
 int sc_knownPacks (int client_fd);
+int sc_updateEnabledFeatures (int client_fd);
 int sc_sendPluginMessage (int client_fd, const char *channel, const uint8_t *data, size_t data_len);
 int sc_finishConfiguration (int client_fd);
 int sc_loginPlay (int client_fd);
 int sc_synchronizePlayerPosition (int client_fd, double x, double y, double z, float yaw, float pitch);
-int sc_setDefaultSpawnPosition (int client_fd, int64_t x, int64_t y, int64_t z);
+int sc_setDefaultSpawnPosition (int client_fd, const char *dimension, int64_t x, int64_t y, int64_t z, float yaw, float pitch);
 int sc_startWaitingForChunks (int client_fd);
 int sc_playerAbilities (int client_fd, uint8_t flags);
 int sc_updateTime (int client_fd, uint64_t ticks);

@@ -332,6 +332,11 @@ ssize_t readLengthPrefixedData (int client_fd) {
 // Reads a protocol string into recv_buffer.
 void readString (int client_fd) {
   recv_count = readLengthPrefixedData(client_fd);
+  if (recv_count < 0) {
+    recv_buffer[0] = '\0';
+    return;
+  }
+  if ((size_t)recv_count >= MAX_RECV_BUF_LEN) recv_count = MAX_RECV_BUF_LEN - 1;
   recv_buffer[recv_count] = '\0';
 }
 // Reads a protocol string capped at max_length bytes.
@@ -345,11 +350,21 @@ void readStringN (int client_fd, uint32_t max_length) {
   uint32_t length = readVarInt(client_fd);
   if (max_length > length) {
     recv_count = recv_all(client_fd, recv_buffer, length, false);
+    if (recv_count < 0) {
+      recv_buffer[0] = '\0';
+      return;
+    }
+    if ((size_t)recv_count >= MAX_RECV_BUF_LEN) recv_count = MAX_RECV_BUF_LEN - 1;
     recv_buffer[recv_count] = '\0';
     return;
   }
   // Read up to cap, discard remaining bytes from wire.
   recv_count = recv_all(client_fd, recv_buffer, max_length, false);
+  if (recv_count < 0) {
+    recv_buffer[0] = '\0';
+    return;
+  }
+  if ((size_t)recv_count >= MAX_RECV_BUF_LEN) recv_count = MAX_RECV_BUF_LEN - 1;
   recv_buffer[recv_count] = '\0';
   discard_all(client_fd, length - max_length, false);
 }

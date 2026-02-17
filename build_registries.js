@@ -58,6 +58,7 @@ const blockWhitelist = [
   "stone_slab",
   "cobblestone_slab",
   "composter",
+  "redstone_block",
   "coal_block",
   "copper_ore",
   "copper_block"
@@ -183,6 +184,16 @@ function writeVarInt (value) {
   }
 }
 
+function asResourceLocation (name) {
+  if (name.includes(":")) return name;
+  return `minecraft:${name}`;
+}
+
+function normalizeTagReference (value) {
+  if (value.startsWith("#")) return "#" + asResourceLocation(value.slice(1));
+  return asResourceLocation(value);
+}
+
 // Scan directory recursively to find all JSON files
 async function scanDirectory (basePath, currentPath = "") {
   const entries = {};
@@ -216,7 +227,7 @@ function serializeRegistry (name, entries) {
   parts.push(Buffer.from([0x07]));
 
   // Registry name
-  const nameBuf = Buffer.from(name, "utf8");
+  const nameBuf = Buffer.from(asResourceLocation(name), "utf8");
   parts.push(writeVarInt(nameBuf.length));
   parts.push(nameBuf);
 
@@ -225,7 +236,7 @@ function serializeRegistry (name, entries) {
 
   // Serialize entries
   for (const entryName of entries) {
-    const entryBuf = Buffer.from(entryName, "utf8");
+    const entryBuf = Buffer.from(asResourceLocation(entryName), "utf8");
     parts.push(writeVarInt(entryBuf.length));
     parts.push(entryBuf);
     parts.push(Buffer.from([0x00]));
@@ -254,7 +265,7 @@ function serializeTags (tags) {
   for (const type in tags) {
 
     // Tag registry identifier
-    const identifier = Buffer.from(type, "utf8");
+    const identifier = Buffer.from(asResourceLocation(type), "utf8");
     parts.push(writeVarInt(identifier.length));
     parts.push(identifier);
 
@@ -264,7 +275,7 @@ function serializeTags (tags) {
     // Write tag data
     for (const tag in tags[type]) {
       // Tag identifier
-      const identifier = Buffer.from(tag, "utf8");
+      const identifier = Buffer.from(asResourceLocation(tag), "utf8");
       parts.push(writeVarInt(identifier.length));
       parts.push(identifier);
       // Array of IDs
@@ -293,6 +304,130 @@ function toVarIntBuffer (array) {
   return Buffer.concat(parts);
 }
 
+async function collectTagFiles (baseDir) {
+  const files = [];
+  async function walk (dir) {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) await walk(full);
+      else if (entry.isFile() && entry.name.endsWith(".json")) files.push(full);
+    }
+  }
+  await walk(baseDir);
+  return files;
+}
+
+async function buildTagPayloadFromNotchianData (basePath, registriesJSON, syncedRegistryEntries) {
+  const tagsRoot = path.join(basePath, "tags");
+  const tagFiles = await collectTagFiles(tagsRoot);
+
+  const registryIndex = {};
+  for (const registryName of Object.keys(registriesJSON)) {
+    registryIndex[registryName] = {};
+    const entries = registriesJSON[registryName].entries || {};
+    for (const id of Object.keys(entries)) {
+      registryIndex[registryName][id] = entries[id].protocol_id;
+    }
+  }
+
+  for (const registryName of Object.keys(syncedRegistryEntries)) {
+    const fullRegistryName = asResourceLocation(registryName);
+    if (!registryIndex[fullRegistryName]) registryIndex[fullRegistryName] = {};
+    const entries = [...syncedRegistryEntries[registryName]];
+    entries.sort();
+    for (let i = 0; i < entries.length; i ++) {
+      registryIndex[fullRegistryName][asResourceLocation(entries[i])] = i;
+    }
+  }
+
+  const knownRegistrySuffixes = new Set(Object.keys(registryIndex).map(c => c.replace(/^minecraft:/, "")));
+  const rawTags = {};
+
+  for (const file of tagFiles) {
+    const rel = path.relative(tagsRoot, file).replace(/\\/g, "/");
+    const noExt = rel.replace(/\.json$/, "");
+    const parts = noExt.split("/");
+
+    let type = null;
+    let typeLen = 0;
+    for (let i = parts.length - 1; i >= 1; i --) {
+      const candidate = parts.slice(0, i).join("/");
+      if (knownRegistrySuffixes.has(candidate)) {
+        type = candidate;
+        typeLen = i;
+        break;
+      }
+    }
+    if (!type) continue;
+
+    const tagName = parts.slice(typeLen).join("/");
+    if (!tagName) continue;
+
+    const json = JSON.parse(await fs.readFile(file, "utf8"));
+    const values = Array.isArray(json.values) ? json.values : [];
+    const normalizedValues = [];
+    for (const entry of values) {
+      if (typeof entry === "string") {
+        normalizedValues.push(normalizeTagReference(entry));
+      } else if (entry && typeof entry === "object" && typeof entry.id === "string") {
+        normalizedValues.push(normalizeTagReference(entry.id));
+      }
+    }
+
+    if (!rawTags[type]) rawTags[type] = {};
+    rawTags[type][tagName] = normalizedValues;
+  }
+
+  const resolved = {};
+  for (const type of Object.keys(rawTags)) {
+    if (!syncedTagTypes.has(type)) continue;
+    const registryKey = `minecraft:${type}`;
+    const idMap = registryIndex[registryKey];
+    if (!idMap) continue;
+
+    resolved[type] = {};
+    const resolving = new Set();
+    const resolvedCache = {};
+
+    const resolveTag = (tagName) => {
+      if (resolvedCache[tagName]) return resolvedCache[tagName];
+      if (resolving.has(tagName)) return [];
+      resolving.add(tagName);
+
+      const out = new Set();
+      const refs = rawTags[type][tagName] || [];
+      for (const ref of refs) {
+        if (ref.startsWith("#")) {
+          const nestedFull = ref.slice(1);
+          const nestedPrefix = `${asResourceLocation(type)}/`;
+          let nestedName = null;
+          if (nestedFull.startsWith(nestedPrefix)) nestedName = nestedFull.slice(nestedPrefix.length);
+          else if (nestedFull.startsWith("minecraft:")) nestedName = nestedFull.slice("minecraft:".length);
+          if (!nestedName || !rawTags[type][nestedName]) continue;
+          for (const id of resolveTag(nestedName)) out.add(id);
+        } else {
+          const pid = idMap[ref];
+          if (pid === undefined) continue;
+          out.add(pid);
+        }
+      }
+
+      resolving.delete(tagName);
+      const arr = [...out];
+      arr.sort((a, b) => a - b);
+      resolvedCache[tagName] = arr;
+      return arr;
+    };
+
+    for (const tagName of Object.keys(rawTags[type])) {
+      resolved[type][tagName] = resolveTag(tagName);
+    }
+  }
+
+  return serializeTags(resolved);
+}
+
 // Convert to C-style hex byte array string
 function toCArray (buffer) {
   const hexBytes = [...buffer].map(b => `0x${b.toString(16).padStart(2, "0")}`);
@@ -303,17 +438,48 @@ function toCArray (buffer) {
   return lines.join(",\n");
 }
 
-const requiredRegistries = [
-  "cat_variant",
-  "chicken_variant",
-  "cow_variant",
-  "frog_variant",
-  "painting_variant",
-  "pig_variant",
-  "wolf_sound_variant",
+const syncedRegistries = [
+  "worldgen/biome",
+  "chat_type",
+  "trim_pattern",
+  "trim_material",
   "wolf_variant",
-  "damage_type"
+  "wolf_sound_variant",
+  "pig_variant",
+  "frog_variant",
+  "cat_variant",
+  "cow_variant",
+  "chicken_variant",
+  "zombie_nautilus_variant",
+  "painting_variant",
+  "dimension_type",
+  "damage_type",
+  "banner_pattern",
+  "enchantment",
+  "jukebox_song",
+  "instrument",
+  "test_environment",
+  "test_instance",
+  "dialog",
+  "timeline"
 ];
+
+const syncedTagTypes = new Set([
+  "dialog",
+  "item",
+  "enchantment",
+  "point_of_interest_type",
+  "game_event",
+  "block",
+  "banner_pattern",
+  "fluid",
+  "painting_variant",
+  "worldgen/biome",
+  "damage_type",
+  "entity_type",
+  "instrument",
+  "timeline"
+]);
 
 async function convert () {
 
@@ -322,89 +488,24 @@ async function convert () {
   const headerPath = __dirname + "/include/registries.h";
 
   const registries = await scanDirectory(inputPath);
+  const registriesJSON = JSON.parse(await fs.readFile(`${__dirname}/notchian/generated/reports/registries.json`, "utf8"));
   const registryBuffers = [];
 
-  for (const registry of requiredRegistries) {
+  for (const registry of syncedRegistries) {
     if (!(registry in registries)) {
       console.error(`Missing required registry "${registry}"!`);
       return;
     }
-    if (registry.endsWith("variant")) {
-      // The mob "variants" only require one valid variant to be accepted
-      // Send "temperate" if available, otherwise shortest string to save memory
-      if (registries[registry].includes("temperate")) {
-        registryBuffers.push(serializeRegistry(registry, ["temperate"]));
-      } else {
-        const shortest = registries[registry].sort((a, b) => a.length - b.length)[0];
-        registryBuffers.push(serializeRegistry(registry, [shortest]));
-      }
-    } else {
-      registryBuffers.push(serializeRegistry(registry, registries[registry]));
-    }
+    const entries = [...registries[registry]];
+    // Ensure stable holder indices across filesystems/runs.
+    entries.sort();
+    registryBuffers.push(serializeRegistry(registry, entries));
   }
-  // Send biomes separately - only "plains" is actually required
-  registryBuffers.push(serializeRegistry("worldgen/biome", biomes));
-  // Send dimensions separately - we only use "overworld"
-  registryBuffers.push(serializeRegistry("dimension_type", ["overworld"]));
   const fullRegistryBuffer = Buffer.concat(registryBuffers);
 
   const itemsAndBlocks = await extractItemsAndBlocks();
 
-  const tagBuffer = serializeTags({
-    "fluid": {
-      // Water and lava, both flowing and still states
-      "water": [ 1, 2 ],
-      "lava": [ 3, 4 ]
-    },
-    "block": {
-      "mineable/pickaxe": [
-        itemsAndBlocks.blockRegistry["stone"],
-        itemsAndBlocks.blockRegistry["stone_slab"],
-        itemsAndBlocks.blockRegistry["cobblestone"],
-        itemsAndBlocks.blockRegistry["cobblestone_slab"],
-        itemsAndBlocks.blockRegistry["sandstone"],
-        itemsAndBlocks.blockRegistry["sandstone_slab"],
-        itemsAndBlocks.blockRegistry["ice"],
-        itemsAndBlocks.blockRegistry["diamond_ore"],
-        itemsAndBlocks.blockRegistry["gold_ore"],
-        itemsAndBlocks.blockRegistry["redstone_ore"],
-        itemsAndBlocks.blockRegistry["iron_ore"],
-        itemsAndBlocks.blockRegistry["coal_ore"],
-        itemsAndBlocks.blockRegistry["copper_ore"],
-        itemsAndBlocks.blockRegistry["furnace"],
-        itemsAndBlocks.blockRegistry["iron_block"],
-        itemsAndBlocks.blockRegistry["gold_block"],
-        itemsAndBlocks.blockRegistry["diamond_block"],
-        itemsAndBlocks.blockRegistry["redstone_block"],
-        itemsAndBlocks.blockRegistry["coal_block"],
-        itemsAndBlocks.blockRegistry["copper_block"]
-      ],
-      "mineable/axe": [
-        itemsAndBlocks.blockRegistry["oak_log"],
-        itemsAndBlocks.blockRegistry["oak_planks"],
-        itemsAndBlocks.blockRegistry["oak_wood"],
-        itemsAndBlocks.blockRegistry["oak_slab"],
-        itemsAndBlocks.blockRegistry["crafting_table"],
-        itemsAndBlocks.blockRegistry["chest"]
-      ],
-      "mineable/shovel": [
-        itemsAndBlocks.blockRegistry["grass_block"],
-        itemsAndBlocks.blockRegistry["dirt"],
-        itemsAndBlocks.blockRegistry["sand"],
-        itemsAndBlocks.blockRegistry["snow"],
-        itemsAndBlocks.blockRegistry["snow_block"],
-        itemsAndBlocks.blockRegistry["mud"]
-      ],
-      "leaves": [
-        itemsAndBlocks.blockRegistry["oak_leaves"]
-      ]
-    },
-    "item": {
-      "planks": [
-        itemsAndBlocks.items["oak_planks"]
-      ]
-    }
-  });
+  const tagBuffer = await buildTagPayloadFromNotchianData(inputPath, registriesJSON, registries);
 
   const networkBlockPalette = toVarIntBuffer(Object.values(itemsAndBlocks.palette));
 

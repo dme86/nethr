@@ -299,15 +299,41 @@ void handlePlayerJoin (PlayerData* player) {
 
 void disconnectClient (int *client_fd, int cause) {
   if (*client_fd == -1) return;
+  int state = getClientState(*client_fd);
+  int saved_errno = errno;
   client_count --;
   setClientState(*client_fd, STATE_NONE);
   handlePlayerDisconnect(*client_fd);
+
+  const char *cause_text = "unknown";
+  switch (cause) {
+    case -2: cause_text = "send timeout/socket write failure"; break;
+    case -1: cause_text = "recv timeout/socket read failure"; break;
+    case 1: cause_text = "peek failed or peer closed connection"; break;
+    case 2: cause_text = "invalid packet length varint"; break;
+    case 3: cause_text = "invalid packet id varint"; break;
+    case 4: cause_text = "post-handle recv indicates closed/error socket"; break;
+    case 5: cause_text = "legacy ping probe rejected"; break;
+    case 6: cause_text = "dev world dump complete"; break;
+    case 7: cause_text = "dev world import complete"; break;
+    case 8: cause_text = "status ping complete (intentional close)"; break;
+  }
+
   #ifdef _WIN32
+  int saved_wsa_errno = WSAGetLastError();
   closesocket(*client_fd);
-  printf("Disconnected client %d, cause: %d, errno: %d\n", *client_fd, cause, WSAGetLastError());
+  printf(
+    "Disconnected client %d, cause: %d (%s), state: %d, wsa_before_close: %d, wsa_after_close: %d\n",
+    *client_fd, cause, cause_text, state, saved_wsa_errno, WSAGetLastError()
+  );
   #else
   close(*client_fd);
-  printf("Disconnected client %d, cause: %d, errno: %d\n\n", *client_fd, cause, errno);
+  printf(
+    "Disconnected client %d, cause: %d (%s), state: %d, errno_before_close: %d (%s), errno_after_close: %d (%s)\n\n",
+    *client_fd, cause, cause_text, state,
+    saved_errno, strerror(saved_errno),
+    errno, strerror(errno)
+  );
   #endif
   *client_fd = -1;
 }
@@ -440,6 +466,10 @@ void spawnPlayer (PlayerData *player) {
   }
 
   // Teleport player to spawn coordinates (first pass)
+  printf(
+    "Spawn sequence: initial player_position (x=%.2f y=%.2f z=%.2f yaw=%.2f pitch=%.2f)\n",
+    spawn_x, spawn_y, spawn_z, spawn_yaw, spawn_pitch
+  );
   sc_synchronizePlayerPosition(player->client_fd, spawn_x, spawn_y, spawn_z, spawn_yaw, spawn_pitch);
 
   task_yield(); // Yield between packet bursts.
@@ -472,7 +502,8 @@ void spawnPlayer (PlayerData *player) {
   short _x = div_floor(player->x, 16), _z = div_floor(player->z, 16);
 
   // Indicate that we're about to send chunk data
-  sc_setDefaultSpawnPosition(player->client_fd, 8, 80, 8);
+  printf("Spawn sequence: set_default_spawn_position + game_event(wait_chunks) + set_chunk_cache_center\n");
+  sc_setDefaultSpawnPosition(player->client_fd, "minecraft:overworld", 8, 80, 8, 0.0f, 0.0f);
   sc_startWaitingForChunks(player->client_fd);
   sc_setCenterChunk(player->client_fd, _x, _z);
 

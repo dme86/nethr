@@ -3,9 +3,9 @@
 SHELL := /bin/bash
 CC ?= gcc
 
-MC_VERSION ?= 1.21.8
+MC_VERSION ?= 1.21.11
 SERVER_JAR ?= notchian/server.jar
-SERVER_JAR_URL ?= https://piston-data.mojang.com/v1/objects/6bce4ef400e4efaa63a13d5e6f6b500be969ef81/server.jar
+SERVER_JAR_URL ?= https://piston-data.mojang.com/v1/objects/64bb6d763bed0a9f1d632ec347938594144943ed/server.jar
 
 JAVA_BIN ?= $(if $(wildcard .deps/jdk/Contents/Home/bin/java),$(abspath .deps/jdk/Contents/Home/bin/java),java)
 NODE_BIN ?= $(if $(wildcard .deps/node/bin/node),$(abspath .deps/node/bin/node),node)

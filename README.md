@@ -9,8 +9,8 @@ Lightweight Minecraft server focused on constrained systems.
 
 Vanilla protocol compatibility is implemented pragmatically, not as a strict goal.
 
-- Minecraft version: `1.21.8`
-- Protocol version: `772`
+- Minecraft version: `1.21.11`
+- Protocol version: `774`
 
 > [!WARNING]
 > The vanilla client is the supported baseline. Modded clients (for example Fabric-based stacks) may behave unpredictably.
