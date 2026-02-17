@@ -23,6 +23,7 @@
     #include <winsock2.h>
     #include <ws2tcpip.h>
   #else
+    #include <sys/stat.h>
     #include <sys/socket.h>
     #include <netinet/in.h>
     #include <arpa/inet.h>
@@ -40,34 +41,106 @@
 #include "procedures.h"
 #include "serialize.h"
 
-/**
- * Routes an incoming packet to its packet handler or procedure.
- *
- * Full disclosure, I think this whole thing is a bit of a mess.
- * The packet handlers started out as having proper error checks and
- * handling, but that turned out to be very tedious and space/time
- * consuming, and didn't really help with resolving errors. Not to mention
- * that all those checks likely compound into a non-negligible performance
- * hit on embedded systems.
- *
- * I think the way forward would be to gut the return values of the packet
- * handlers, as most of them only ever return 0, and others aren't checked
- * here. The length discrepancy checks at the bottom already do a good job
- * at preventing this from derailing completely in case of a bad packet,
- * and I think leaning into those is fine.
- *
- * In other words, I think the sc_/cs_ handlers should be of type `void`,
- * and should simply return early when there's a failure that prevents the
- * server from handling a packet. Any data that's left unhandled/unread
- * will be caught by the length discrepancy checks. That's more or less
- * how it already works, just not explicitly.
- *
- * Why have I not done this yet? Well, I'm close to uploading the video,
- * and I don't want to risk refactoring anything this close to release.
- */
+#if !defined(ESP_PLATFORM) && !defined(_WIN32)
+
+#define ADMIN_PIPE_PATH "/tmp/nethr-admin.pipe"
+#define ADMIN_PIPE_PREFIX "§c[SYSTEM] "
+#define ADMIN_PIPE_READ_SIZE 256
+#define ADMIN_PIPE_MAX_LINE 220
+
+static int admin_pipe_fd = -1;
+static char admin_pipe_line[ADMIN_PIPE_MAX_LINE];
+static size_t admin_pipe_line_len = 0;
+
+static void broadcastSystemMessage (const char *message, size_t len) {
+  if (len == 0) return;
+
+  char out[sizeof(ADMIN_PIPE_PREFIX) + ADMIN_PIPE_MAX_LINE];
+  size_t prefix_len = sizeof(ADMIN_PIPE_PREFIX) - 1;
+  if (len > ADMIN_PIPE_MAX_LINE) len = ADMIN_PIPE_MAX_LINE;
+
+  memcpy(out, ADMIN_PIPE_PREFIX, prefix_len);
+  memcpy(out + prefix_len, message, len);
+
+  for (int i = 0; i < MAX_PLAYERS; i ++) {
+    if (player_data[i].client_fd == -1) continue;
+    if (player_data[i].flags & 0x20) continue;
+    sc_systemChat(player_data[i].client_fd, out, (uint16_t)(prefix_len + len));
+  }
+}
+
+static void flushAdminPipeLine () {
+  while (admin_pipe_line_len > 0 &&
+    (admin_pipe_line[admin_pipe_line_len - 1] == '\n' || admin_pipe_line[admin_pipe_line_len - 1] == '\r')
+  ) admin_pipe_line_len --;
+
+  if (admin_pipe_line_len > 0) {
+    broadcastSystemMessage(admin_pipe_line, admin_pipe_line_len);
+  }
+
+  admin_pipe_line_len = 0;
+}
+
+static void pollAdminPipe () {
+  if (admin_pipe_fd == -1) return;
+
+  char read_buf[ADMIN_PIPE_READ_SIZE];
+  while (true) {
+    ssize_t received = read(admin_pipe_fd, read_buf, sizeof(read_buf));
+    if (received <= 0) {
+      if (received < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+        perror("admin pipe read failed");
+      }
+      break;
+    }
+
+    for (ssize_t i = 0; i < received; i ++) {
+      if (read_buf[i] == '\n') {
+        flushAdminPipeLine();
+      } else if (read_buf[i] != '\r' && admin_pipe_line_len < ADMIN_PIPE_MAX_LINE) {
+        admin_pipe_line[admin_pipe_line_len++] = read_buf[i];
+      }
+    }
+  }
+}
+
+static void initAdminPipe () {
+  struct stat st;
+  if (stat(ADMIN_PIPE_PATH, &st) == 0) {
+    if (!S_ISFIFO(st.st_mode)) {
+      fprintf(stderr, "admin pipe path exists but is not a FIFO: %s\n", ADMIN_PIPE_PATH);
+      return;
+    }
+  } else if (errno == ENOENT) {
+    if (mkfifo(ADMIN_PIPE_PATH, 0600) != 0) {
+      perror("mkfifo failed");
+      return;
+    }
+  } else {
+    perror("stat admin pipe failed");
+    return;
+  }
+
+  chmod(ADMIN_PIPE_PATH, 0600);
+  admin_pipe_fd = open(ADMIN_PIPE_PATH, O_RDWR | O_NONBLOCK);
+  if (admin_pipe_fd == -1) {
+    perror("open admin pipe failed");
+    return;
+  }
+
+  printf("Admin pipe ready: %s\n", ADMIN_PIPE_PATH);
+}
+
+static void shutdownAdminPipe () {
+  if (admin_pipe_fd != -1) close(admin_pipe_fd);
+}
+
+#endif
+
+/* Dispatches one parsed packet to its state-specific handler. */
 void handlePacket (int client_fd, int length, int packet_id, int state) {
 
-  // Count the amount of bytes received to catch length discrepancies
+  // Track bytes consumed while this packet is processed.
   uint64_t bytes_received_start = total_bytes_received;
 
   switch (packet_id) {
@@ -98,13 +171,11 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
       break;
 
     case 0x01:
-      // Handle status ping
+      // Status ping: echo payload and close.
       if (state == STATE_STATUS) {
-        // No need for a packet handler, just echo back the long verbatim
         writeByte(client_fd, 9);
         writeByte(client_fd, 0x01);
         writeUint64(client_fd, readUint64(client_fd));
-        // Close connection after this
         recv_count = 0;
         return;
       }
@@ -121,36 +192,33 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
       } else if (state == STATE_CONFIGURATION) {
         printf("Client Acknowledged Configuration\n\n");
 
-        // Enter client into "play" state
+        // Promote client to PLAY and send initial world/player state.
         setClientState(client_fd, STATE_PLAY);
         sc_loginPlay(client_fd);
 
         PlayerData *player;
         if (getPlayerData(client_fd, &player)) break;
 
-        // Send full client spawn sequence
         spawnPlayer(player);
 
-        // Register all existing players and spawn their entities
+        // Register already connected players for this client.
         for (int i = 0; i < MAX_PLAYERS; i ++) {
           if (player_data[i].client_fd == -1) continue;
-          // Note that this will also filter out the joining player
+          // Loading players are not visible yet.
           if (player_data[i].flags & 0x20) continue;
           sc_playerInfoUpdateAddPlayer(client_fd, player_data[i]);
           sc_spawnEntityPlayer(client_fd, player_data[i]);
         }
 
-        // Send information about all other entities (mobs):
-        // Use a random number for the first half of the UUID
+        // Spawn currently allocated mobs for this client.
         uint8_t uuid[16];
         uint32_t r = fast_rand();
         memcpy(uuid, &r, 4);
-        // Send allocated living mobs, use ID for second half of UUID
+        // Reuse mob index as stable UUID suffix.
         for (int i = 0; i < MAX_MOBS; i ++) {
           if (mob_data[i].type == 0) continue;
           if ((mob_data[i].data & 31) == 0) continue;
           memcpy(uuid + 4, &i, 4);
-          // For more info on the arguments here, see the spawnMob function
           sc_spawnEntity(
             client_fd, -2 - i, uuid,
             mob_data[i].type, mob_data[i].x, mob_data[i].y, mob_data[i].z,
@@ -178,7 +246,7 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
       if (state == STATE_PLAY) cs_clientStatus(client_fd);
       break;
 
-    case 0x0C: // Client tick (ignored)
+    case 0x0C: // Client tick (unused).
       break;
 
     case 0x11:
@@ -191,7 +259,7 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
 
     case 0x1B:
       if (state == STATE_PLAY) {
-        // Serverbound keep-alive (ignored)
+        // Serverbound keep-alive is ignored.
         discard_all(client_fd, length, false);
       }
       break;
@@ -210,7 +278,7 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
         float yaw, pitch;
         uint8_t on_ground;
 
-        // Read player position (and rotation)
+        // Decode movement payload variant.
         if (packet_id == 0x1D) cs_setPlayerPosition(client_fd, &x, &y, &z, &on_ground);
         else if (packet_id == 0x1F) cs_setPlayerRotation (client_fd, &yaw, &pitch, &on_ground);
         else if (packet_id == 0x20) cs_setPlayerMovementFlags (client_fd, &on_ground);
@@ -222,7 +290,7 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
         uint8_t block_feet = getBlockAt(player->x, player->y, player->z);
         uint8_t swimming = block_feet >= B_water && block_feet < B_water + 8;
 
-        // Handle fall damage
+        // Apply basic fall-damage logic.
         if (on_ground) {
           int16_t damage = player->grounded_y - player->y - 3;
           if (damage > 0 && (GAMEMODE == 0 || GAMEMODE == 2) && !swimming) {
@@ -233,47 +301,41 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
           player->grounded_y = player->y;
         }
 
-        // Don't continue if all we got were flags
+        // Movement flags only.
         if (packet_id == 0x20) break;
 
-        // Update rotation in player data (if applicable)
+        // Update stored rotation when present in packet.
         if (packet_id != 0x1D) {
           player->yaw = ((short)(yaw + 540) % 360 - 180) * 127 / 180;
           player->pitch = pitch / 90.0f * 127.0f;
         }
 
-        // Whether to broadcast player position to other players
+        // Control whether this update is rebroadcast to other clients.
         uint8_t should_broadcast = true;
 
         #ifndef BROADCAST_ALL_MOVEMENT
-          // If applicable, tie movement updates to the tickrate by using
-          // a flag that gets reset on every tick. It might sound better
-          // to just make the tick handler broadcast position updates, but
-          // then we lose precision. While position is stored using integers,
-          // here the client gives us doubles and floats directly.
+          // Limit movement rebroadcasts to once per tick.
           should_broadcast = !(player->flags & 0x40);
           if (should_broadcast) player->flags |= 0x40;
         #endif
 
         #ifdef SCALE_MOVEMENT_UPDATES_TO_PLAYER_COUNT
-          // If applicable, broadcast only every client_count-th movement update
+          // Increase throttling as player count grows.
           if (++player->packets_since_update < client_count) {
             should_broadcast = false;
           } else {
-            // Note that this does not explicitly set should_broadcast to true
-            // This allows the above BROADCAST_ALL_MOVEMENT check to compound
-            // Whether that's ever favorable is up for debate
+            // Keep existing should_broadcast decision and reset cadence.
             player->packets_since_update = 0;
           }
         #endif
 
         if (should_broadcast) {
-          // If the packet had no rotation data, calculate it from player data
+          // Derive missing rotation fields from cached player state.
           if (packet_id == 0x1D) {
             yaw = player->yaw * 180 / 127;
             pitch = player->pitch * 90 / 127;
           }
-          // Send current position data to all connected players
+          // Broadcast movement to visible clients.
           for (int i = 0; i < MAX_PLAYERS; i ++) {
             if (player_data[i].client_fd == -1) continue;
             if (player_data[i].flags & 0x20) continue;
@@ -287,15 +349,10 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
           }
         }
 
-        // Don't continue if all we got was rotation data
+        // Rotation-only update.
         if (packet_id == 0x1F) break;
 
-        // Players send movement packets roughly 20 times per second when
-        // moving, and much less frequently when standing still. We can
-        // use this correlation between actions and packet count to cheaply
-        // simulate hunger with a timer-based system, where the timer ticks
-        // down with each position packet. The timer value itself then
-        // naturally works as a substitute for saturation.
+        // Approximate hunger drain by movement-packet frequency.
         if (player->saturation == 0) {
           if (player->hunger > 0) player->hunger--;
           player->saturation = 200;
@@ -304,17 +361,17 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
           player->saturation -= 1;
         }
 
-        // Cast the values to short to get integer position
+        // Quantize to block coordinates.
         short cx = x, cy = y, cz = z;
         if (x < 0) cx -= 1;
         if (z < 0) cz -= 1;
-        // Determine the player's chunk coordinates
+        // Compute current chunk coordinates.
         short _x = (cx < 0 ? cx - 16 : cx) / 16, _z = (cz < 0 ? cz - 16 : cz) / 16;
-        // Calculate distance between previous and current chunk coordinates
+        // Compute chunk delta from previous position.
         short dx = _x - (player->x < 0 ? player->x - 16 : player->x) / 16;
         short dz = _z - (player->z < 0 ? player->z - 16 : player->z) / 16;
 
-        // Prevent players from leaving the world
+        // Clamp vertical position to world bounds.
         if (cy < 0) {
           cy = 0;
           player->grounded_y = 0;
@@ -324,15 +381,15 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
           sc_synchronizePlayerPosition(client_fd, cx, 255, cz, player->yaw * 180 / 127, player->pitch * 90 / 127);
         }
 
-        // Update position in player data
+        // Persist quantized position.
         player->x = cx;
         player->y = cy;
         player->z = cz;
 
-        // Exit early if no chunk borders were crossed
+        // Stop if player stayed in the same chunk.
         if (dx == 0 && dz == 0) break;
 
-        // Check if the player has recently been in this chunk
+        // Avoid re-sending recently visited chunks.
         int found = false;
         for (int i = 0; i < VISITED_HISTORY; i ++) {
           if (player->visited_x[i] == _x && player->visited_z[i] == _z) {
@@ -342,7 +399,7 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
         }
         if (found) break;
 
-        // Update player's recently visited chunks
+        // Shift visit history and append current chunk.
         for (int i = 0; i < VISITED_HISTORY - 1; i ++) {
           player->visited_x[i] = player->visited_x[i + 1];
           player->visited_z[i] = player->visited_z[i + 1];
@@ -352,20 +409,18 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
 
         uint32_t r = fast_rand();
         uint8_t in_nether_zone = player->z >= NETHER_ZONE_OFFSET;
-        // Spawn mobs less aggressively to preserve tick stability.
+        // Gate spawn attempts to preserve tick stability.
         if (r % PASSIVE_SPAWN_CHANCE == 0) {
-          // The mob is placed in the middle of the new chunk row,
-          // at a random position within the chunk
+          // Spawn candidate near chunk edge in movement direction.
           short mob_x = (_x + dx * VIEW_DISTANCE) * 16 + ((r >> 4) & 15);
           short mob_z = (_z + dz * VIEW_DISTANCE) * 16 + ((r >> 8) & 15);
-          // Start at the Y coordinate of the spawning player and move upward
-          // until a valid space is found
+          // Search upward for a valid spawn column.
           uint8_t mob_y = cy - 8;
           uint8_t b_low = getBlockAt(mob_x, mob_y - 1, mob_z);
           uint8_t b_mid = getBlockAt(mob_x, mob_y, mob_z);
           uint8_t b_top = getBlockAt(mob_x, mob_y + 1, mob_z);
           while (mob_y < 255) {
-            if ( // Solid block below, non-solid(spawnable) at feet and above
+            if ( // Require solid ground and free blocks at feet/head.
               !isPassableBlock(b_low) &&
               isPassableSpawnBlock(b_mid) &&
               isPassableSpawnBlock(b_top)
@@ -376,11 +431,10 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
             mob_y ++;
           }
           if (mob_y != 255) {
-            // Spawn passive mobs above ground during the day,
-            // or hostiles underground and during the night.
+            // Spawn passives by day above ground, hostiles otherwise.
             if ((world_time < 13000 || world_time > 23460) && mob_y > 48) {
               if (in_nether_zone) {
-                // Keep the nether zone sparse.
+                // Keep nether-zone population sparse.
                 if ((r >> 12) & 1) spawnMob(145, mob_x, mob_y, mob_z, 20); // Zombie stand-in
               } else {
                 uint32_t mob_choice = (r >> 12) % 5;
@@ -482,7 +536,7 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
 
   }
 
-  // Detect and fix incorrectly parsed packets
+  // Recover stream alignment if handler consumed fewer bytes than expected.
   int processed_length = total_bytes_received - bytes_received_start;
   if (processed_length == length) return;
 
@@ -508,7 +562,7 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
 }
 
 int main () {
-  #ifdef _WIN32 //initialize windows socket
+  #ifdef _WIN32 // Initialize WinSock.
     WSADATA wsa;
       if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
         fprintf(stderr, "WSAStartup failed\n");
@@ -516,7 +570,7 @@ int main () {
       }
   #endif
 
-  // Hash the seeds to ensure they're random enough
+  // Hash startup seeds before first use.
   world_seed = splitmix64(world_seed);
   printf("World seed (hashed): ");
   for (int i = 3; i >= 0; i --) printf("%X", (unsigned int)((world_seed >> (8 * i)) & 255));
@@ -526,15 +580,15 @@ int main () {
   for (int i = 3; i >= 0; i --) printf("%X", (unsigned int)((rng_seed >> (8 * i)) & 255));
   printf("\n\n");
 
-  // Initialize block changes entries as unallocated
+  // Mark all block-change slots as unused.
   for (int i = 0; i < MAX_BLOCK_CHANGES; i ++) {
     block_changes[i].block = 0xFF;
   }
 
-  // Start the disk/flash serializer (if applicable)
+  // Initialize persistence backend when enabled.
   if (initSerializer()) exit(EXIT_FAILURE);
 
-  // Initialize all file descriptor references to -1 (unallocated)
+  // Initialize client slots and state tables.
   int clients[MAX_PLAYERS], client_index = 0;
   for (int i = 0; i < MAX_PLAYERS; i ++) {
     clients[i] = -1;
@@ -542,7 +596,7 @@ int main () {
     player_data[i].client_fd = -1;
   }
 
-  // Create server TCP socket
+  // Create listening TCP socket.
   int server_fd, opt = 1;
   struct sockaddr_in server_addr, client_addr;
   socklen_t addr_len = sizeof(client_addr);
@@ -562,7 +616,7 @@ int main () {
     exit(EXIT_FAILURE);
   }
 
-  // Bind socket to IP/port
+  // Bind socket to configured port.
   server_addr.sin_family = AF_INET;
   server_addr.sin_addr.s_addr = INADDR_ANY;
   server_addr.sin_port = htons(PORT);
@@ -573,7 +627,7 @@ int main () {
     exit(EXIT_FAILURE);
   }
 
-  // Listen for incoming connections
+  // Start listening for incoming connections.
   if (listen(server_fd, 5) < 0) {
     perror("listen failed");
     close(server_fd);
@@ -581,10 +635,9 @@ int main () {
   }
   printf("Server listening on port %d...\n", PORT);
 
-  // Make the socket non-blocking
-  // This is necessary to not starve the idle task during slow connections
+  // Use non-blocking I/O to avoid stalling the main loop.
   #ifdef _WIN32
-    u_long mode = 1;  // 1 = non-blocking
+    u_long mode = 1; // 1 = non-blocking.
     if (ioctlsocket(server_fd, FIONBIO, &mode) != 0) {
       fprintf(stderr, "Failed to set non-blocking mode\n");
       exit(EXIT_FAILURE);
@@ -594,23 +647,23 @@ int main () {
   fcntl(server_fd, F_SETFL, flags | O_NONBLOCK);
   #endif
 
-  // Track time of last server tick (in microseconds)
+  #if !defined(ESP_PLATFORM) && !defined(_WIN32)
+    initAdminPipe();
+  #endif
+
+  // Timestamp of last completed server tick.
   int64_t last_tick_time = get_program_time();
 
-  /**
-   * Cycles through all connected clients, handling one packet at a time
-   * from each player. With every iteration, attempts to accept a new
-   * client connection.
-   */
+  // Main loop: accept connections, process admin pipe, service one client packet.
   while (true) {
-    // Check if it's time to yield to the idle task
+    // Yield to scheduler/idle task when applicable.
     task_yield();
 
-    // Attempt to accept a new connection
+    // Try to accept one new connection.
     for (int i = 0; i < MAX_PLAYERS; i ++) {
       if (clients[i] != -1) continue;
       clients[i] = accept(server_fd, (struct sockaddr *)&client_addr, &addr_len);
-      // If the accept was successful, make the client non-blocking too
+      // Put accepted client socket in non-blocking mode.
       if (clients[i] != -1) {
         printf("New client, fd: %d\n", clients[i]);
       #ifdef _WIN32
@@ -625,22 +678,26 @@ int main () {
       break;
     }
 
-    // Look for valid connected clients
+    #if !defined(ESP_PLATFORM) && !defined(_WIN32)
+      pollAdminPipe();
+    #endif
+
+    // Round-robin through active client slots.
     client_index ++;
     if (client_index == MAX_PLAYERS) client_index = 0;
     if (clients[client_index] == -1) continue;
 
-    // Handle periodic events (server ticks)
+    // Run server tick at configured interval.
     int64_t time_since_last_tick = get_program_time() - last_tick_time;
     if (time_since_last_tick > TIME_BETWEEN_TICKS) {
       handleServerTick(time_since_last_tick);
       last_tick_time = get_program_time();
     }
 
-    // Handle this individual client
+    // Process one packet from selected client.
     int client_fd = clients[client_index];
 
-    // Check if at least 2 bytes are available for reading
+    // Ensure at least two bytes are available before parsing VarInts.
     #ifdef _WIN32
     recv_count = recv(client_fd, recv_buffer, 2, MSG_PEEK);
     if (recv_count == 0) {
@@ -650,7 +707,7 @@ int main () {
     if (recv_count == SOCKET_ERROR) {
       int err = WSAGetLastError();
       if (err == WSAEWOULDBLOCK) {
-        continue; // no data yet, keep client alive
+        continue; // No data yet, keep client alive.
       } else {
         disconnectClient(&clients[client_index], 1);
         continue;
@@ -665,63 +722,60 @@ int main () {
       continue;
     }
     #endif
-    // Handle 0xBEEF and 0xFEED packets for dumping/uploading world data
+    // Development-only raw world dump/upload protocol.
     #ifdef DEV_ENABLE_BEEF_DUMPS
-    // Received BEEF packet, dump world data and disconnect
+    // 0xBEEF: stream world state to client, then disconnect.
     if (recv_buffer[0] == 0xBE && recv_buffer[1] == 0xEF && getClientState(client_fd) == STATE_NONE) {
-      // Send block changes and player data back to back
-      // The client is expected to know (or calculate) the size of these buffers
+      // Client must know fixed buffer sizes.
       send_all(client_fd, block_changes, sizeof(block_changes));
       send_all(client_fd, player_data, sizeof(player_data));
-      // Flush the socket and receive everything left on the wire
+      // Flush writes and drain remaining inbound bytes.
       shutdown(client_fd, SHUT_WR);
       recv_all(client_fd, recv_buffer, sizeof(recv_buffer), false);
-      // Kick the client
       disconnectClient(&clients[client_index], 6);
       continue;
     }
-    // Received FEED packet, load world data from socket and disconnect
+    // 0xFEED: read world state from client, persist, then disconnect.
     if (recv_buffer[0] == 0xFE && recv_buffer[1] == 0xED && getClientState(client_fd) == STATE_NONE) {
-      // Consume 0xFEED bytes (previous read was just a peek)
+      // Consume magic bytes already peeked above.
       recv_all(client_fd, recv_buffer, 2, false);
-      // Write full buffers straight into memory
+      // Overwrite in-memory world/player buffers.
       recv_all(client_fd, block_changes, sizeof(block_changes), false);
       recv_all(client_fd, player_data, sizeof(player_data), false);
-      // Recover block_changes_count
+      // Rebuild block_changes_count from restored data.
       for (int i = 0; i < MAX_BLOCK_CHANGES; i ++) {
         if (block_changes[i].block == 0xFF) continue;
         if (block_changes[i].block == B_chest) i += 14;
         if (i >= block_changes_count) block_changes_count = i + 1;
       }
-      // Update data on disk
+      // Persist imported state.
       writeBlockChangesToDisk(0, block_changes_count);
       writePlayerDataToDisk();
-      // Kick the client
       disconnectClient(&clients[client_index], 7);
       continue;
     }
     #endif
 
-    // Read packet length
+    // Parse packet length.
     int length = readVarInt(client_fd);
     if (length == VARNUM_ERROR) {
       disconnectClient(&clients[client_index], 2);
       continue;
     }
-    // Read packet ID
+    // Parse packet ID.
     int packet_id = readVarInt(client_fd);
     if (packet_id == VARNUM_ERROR) {
       disconnectClient(&clients[client_index], 3);
       continue;
     }
-    // Get client connection state
+    // Lookup current protocol state.
     int state = getClientState(client_fd);
-    // Disconnect on legacy server list ping
+    // Reject legacy list ping probe.
     if (state == STATE_NONE && length == 254 && packet_id == 122) {
       disconnectClient(&clients[client_index], 5);
       continue;
     }
-    // Handle packet data
+    // Dispatch packet payload.
     handlePacket(client_fd, length - sizeVarInt(packet_id), packet_id, state);
     if (recv_count == 0 || (recv_count == -1 && errno != EAGAIN && errno != EWOULDBLOCK)) {
       disconnectClient(&clients[client_index], 4);
@@ -730,9 +784,12 @@ int main () {
 
   }
 
+  #if !defined(ESP_PLATFORM) && !defined(_WIN32)
+    shutdownAdminPipe();
+  #endif
   close(server_fd);
  
-  #ifdef _WIN32 //cleanup windows socket
+  #ifdef _WIN32 // Cleanup WinSock.
     WSACleanup();
   #endif
 

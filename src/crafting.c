@@ -369,9 +369,9 @@ void getSmeltingOutput (PlayerData *player) {
 
   // Determine fuel efficiency based on the type of item
   // Since we can't represent fractions, some items use a random component
-  // to represent the fractional part. In some cases (e.g. sticks), this
-  // can lead to a fuel_value of 0, which means that the fuel gets consumed
-  // without processing any materials.
+  // To represent the fractional part. In some cases (e.g. sticks), this
+  // Can lead to a fuel_value of 0, which means that the fuel gets consumed
+  // Without processing any materials.
   uint8_t fuel_value = 0;
   if (*fuel == I_coal) fuel_value = 8;
   else if (*fuel == I_charcoal) fuel_value = 8;

@@ -191,50 +191,50 @@ int sc_loginPlay (int client_fd) {
 
   writeVarInt(client_fd, 47 + sizeVarInt(MAX_PLAYERS) + sizeVarInt(VIEW_DISTANCE) * 2);
   writeByte(client_fd, 0x2B);
-  // entity id
+  // Entity id
   writeUint32(client_fd, client_fd);
-  // hardcore
+  // Hardcore
   writeByte(client_fd, false);
-  // dimensions
+  // Dimensions
   writeVarInt(client_fd, 1);
   writeVarInt(client_fd, 9);
   const char *dimension = "overworld";
   send_all(client_fd, dimension, 9);
-  // maxplayers
+  // Maxplayers
   writeVarInt(client_fd, MAX_PLAYERS);
-  // view distance
+  // View distance
   writeVarInt(client_fd, VIEW_DISTANCE);
-  // sim distance
+  // Sim distance
   writeVarInt(client_fd, VIEW_DISTANCE);
-  // reduced debug info
+  // Reduced debug info
   writeByte(client_fd, 0);
-  // respawn screen
+  // Respawn screen
   writeByte(client_fd, true);
-  // limited crafting
+  // Limited crafting
   writeByte(client_fd, false);
-  // dimension id (from server-sent registries)
-  // the server only sends "overworld"
+  // Dimension id (from server-sent registries)
+  // The server only sends "overworld"
   writeVarInt(client_fd, 0);
-  // dimension name
+  // Dimension name
   writeVarInt(client_fd, 9);
   send_all(client_fd, dimension, 9);
-  // hashed seed
+  // Hashed seed
   writeUint64(client_fd, 0x0123456789ABCDEF);
-  // gamemode
+  // Gamemode
   writeByte(client_fd, GAMEMODE);
-  // previous gamemode
+  // Previous gamemode
   writeByte(client_fd, 0xFF);
-  // is debug
+  // Is debug
   writeByte(client_fd, 0);
-  // is flat
+  // Is flat
   writeByte(client_fd, 0);
-  // has death location
+  // Has death location
   writeByte(client_fd, 0);
-  // portal cooldown
+  // Portal cooldown
   writeVarInt(client_fd, 0);
-  // sea level
+  // Sea level
   writeVarInt(client_fd, 63);
-  // secure chat
+  // Secure chat
   writeByte(client_fd, 0);
 
   return 0;
@@ -340,62 +340,62 @@ int sc_chunkDataAndUpdateLight (int client_fd, int _x, int _z) {
   writeUint32(client_fd, _x);
   writeUint32(client_fd, _z);
 
-  writeVarInt(client_fd, 0); // omit heightmaps
+  writeVarInt(client_fd, 0); // Omit heightmaps
 
   writeVarInt(client_fd, chunk_data_size);
 
   int x = _x * 16, z = _z * 16, y;
 
-  // send 4 chunk sections (up to Y=0) with no blocks
+  // Send 4 chunk sections (up to Y=0) with no blocks
   for (int i = 0; i < 4; i ++) {
-    writeUint16(client_fd, 4096); // block count
-    writeByte(client_fd, 0); // block bits
-    writeVarInt(client_fd, 85); // block palette (bedrock)
-    writeByte(client_fd, 0); // biome bits
-    writeByte(client_fd, 0); // biome palette
+    writeUint16(client_fd, 4096); // Block count
+    writeByte(client_fd, 0); // Block bits
+    writeVarInt(client_fd, 85); // Block palette (bedrock)
+    writeByte(client_fd, 0); // Biome bits
+    writeByte(client_fd, 0); // Biome palette
   }
-  // yield to idle task
+  // Yield to idle task
   task_yield();
 
-  // send chunk sections
+  // Send chunk sections
   for (int i = 0; i < 20; i ++) {
     y = i * 16;
-    writeUint16(client_fd, 4096); // block count
-    writeByte(client_fd, 8); // bits per entry
-    writeVarInt(client_fd, 256); // block palette length
-    // block palette as varint buffer
+    writeUint16(client_fd, 4096); // Block count
+    writeByte(client_fd, 8); // Bits per entry
+    writeVarInt(client_fd, 256); // Block palette length
+    // Block palette as varint buffer
     send_all(client_fd, network_block_palette, sizeof(network_block_palette));
-    // chunk section buffer
+    // Chunk section buffer
     uint8_t biome = buildChunkSection(x, y, z);
     send_all(client_fd, chunk_section, 4096);
-    // biome data
-    writeByte(client_fd, 0); // bits per entry
-    writeByte(client_fd, biome); // biome palette
-    // yield to idle task
+    // Biome data
+    writeByte(client_fd, 0); // Bits per entry
+    writeByte(client_fd, biome); // Biome palette
+    // Yield to idle task
     task_yield();
   }
 
-  // send 8 chunk sections (up to Y=192) with no blocks
+  // Send 8 chunk sections (up to Y=192) with no blocks
   for (int i = 0; i < 8; i ++) {
-    writeUint16(client_fd, 4096); // block count
-    writeByte(client_fd, 0); // block bits
-    writeVarInt(client_fd, 0); // block palette (air)
-    writeByte(client_fd, 0); // biome bits
-    writeByte(client_fd, 0); // biome palette
+    writeUint16(client_fd, 4096); // Block count
+    writeByte(client_fd, 0); // Block bits
+    writeVarInt(client_fd, 0); // Block palette (air)
+    writeByte(client_fd, 0); // Biome bits
+    writeByte(client_fd, 0); // Biome palette
   }
-  // yield to idle task
+  // Yield to idle task
   task_yield();
 
-  writeVarInt(client_fd, 0); // omit block entities
+  writeVarInt(client_fd, 0); // Omit block entities
 
-  // light data
+  // Light data
   writeVarInt(client_fd, 1);
   writeUint64(client_fd, 0b11111111111111111111111111);
   writeVarInt(client_fd, 0);
   writeVarInt(client_fd, 0);
   writeVarInt(client_fd, 0);
 
-  // sky light array
+  // Sky light array
   writeVarInt(client_fd, 26);
   for (int i = 0; i < 2048; i ++) chunk_section[i] = 0xFF;
   for (int i = 2048; i < 4096; i ++) chunk_section[i] = 0;
@@ -407,13 +407,13 @@ int sc_chunkDataAndUpdateLight (int client_fd, int _x, int _z) {
     writeVarInt(client_fd, 2048);
     send_all(client_fd, chunk_section, 2048);
   }
-  // don't send block light
+  // Don't send block light
   writeVarInt(client_fd, 0);
 
   // Sending block updates changes light prediciton on the client.
   // Light-emitting blocks are omitted from chunk data so that they can
-  // be overlayed here. This seems to be cheaper than sending actual
-  // block light data.
+  // Be overlayed here. This seems to be cheaper than sending actual
+  // Block light data.
   for (int i = 0; i < block_changes_count; i ++) {
     #ifdef ALLOW_CHESTS
       if (block_changes[i].block != B_torch && block_changes[i].block != B_chest) continue;
@@ -494,7 +494,7 @@ int cs_playerAction (int client_fd) {
   int y = pos << 52 >> 52;
   int z = pos << 26 >> 38;
 
-  readByte(client_fd); // ignore face
+  readByte(client_fd); // Ignore face
 
   int sequence = readVarInt(client_fd);
   sc_acknowledgeBlockChange(client_fd, sequence);
@@ -517,8 +517,8 @@ int sc_openScreen (int client_fd, uint8_t window, const char *title, uint16_t le
   writeVarInt(client_fd, window);
   writeVarInt(client_fd, window);
 
-  writeByte(client_fd, 8); // string nbt tag
-  writeUint16(client_fd, length); // string length
+  writeByte(client_fd, 8); // String nbt tag
+  writeUint16(client_fd, length); // String length
   send_all(client_fd, title, length);
 
   return 0;
@@ -553,12 +553,12 @@ int cs_useItemOn (int client_fd) {
 
   uint8_t face = readByte(client_fd);
 
-  // ignore cursor position
+  // Ignore cursor position
   readUint32(client_fd);
   readUint32(client_fd);
   readUint32(client_fd);
 
-  // ignore "inside block" and "world border hit"
+  // Ignore "inside block" and "world border hit"
   readByte(client_fd);
   readByte(client_fd);
 
@@ -578,7 +578,7 @@ int cs_clickContainer (int client_fd) {
 
   int window_id = readVarInt(client_fd);
 
-  readVarInt(client_fd); // ignore state id
+  readVarInt(client_fd); // Ignore state id
 
   int16_t clicked_slot = readInt16(client_fd);
   uint8_t button = readByte(client_fd);
@@ -590,14 +590,14 @@ int cs_clickContainer (int client_fd) {
   if (getPlayerData(client_fd, &player)) return 1;
 
   uint8_t apply_changes = true;
-  // prevent dropping items
+  // Prevent dropping items
   if (mode == 4 && clicked_slot != -999) {
-    // when using drop button, re-sync the respective slot
+    // When using drop button, re-sync the respective slot
     uint8_t slot = clientSlotToServerSlot(window_id, clicked_slot);
     sc_setContainerSlot(client_fd, window_id, clicked_slot, player->inventory_count[slot], player->inventory_items[slot]);
     apply_changes = false;
   } else if (mode == 0 && clicked_slot == -999) {
-    // when clicking outside inventory, return the dropped item to the player
+    // When clicking outside inventory, return the dropped item to the player
     if (button == 0) {
       givePlayerItem(player, player->flagval_16, player->flagval_8);
       player->flagval_16 = 0;
@@ -626,7 +626,7 @@ int cs_clickContainer (int client_fd) {
   for (int i = 0; i < changes_count; i ++) {
 
     slot = clientSlotToServerSlot(window_id, readUint16(client_fd));
-    // slots outside of the inventory overflow into the crafting buffer
+    // Slots outside of the inventory overflow into the crafting buffer
     if (slot > 40 && apply_changes) craft = true;
 
     #ifdef ALLOW_CHESTS
@@ -644,7 +644,7 @@ int cs_clickContainer (int client_fd) {
       p_count = &player->inventory_count[slot];
     }
 
-    if (!readByte(client_fd)) { // no item?
+    if (!readByte(client_fd)) { // No item?
       if (slot != 255 && apply_changes) {
         *p_item = 0;
         *p_count = 0;
@@ -660,7 +660,7 @@ int cs_clickContainer (int client_fd) {
     item = readVarInt(client_fd);
     count = (uint8_t)readVarInt(client_fd);
 
-    // ignore components
+    // Ignore components
     readLengthPrefixedData(client_fd);
     readLengthPrefixedData(client_fd);
 
@@ -676,22 +676,22 @@ int cs_clickContainer (int client_fd) {
 
   }
 
-  // window 0 is player inventory, window 12 is crafting table
+  // Window 0 is player inventory, window 12 is crafting table
   if (craft && (window_id == 0 || window_id == 12)) {
     getCraftingOutput(player, &count, &item);
     sc_setContainerSlot(client_fd, window_id, 0, count, item);
-  } else if (window_id == 14) { // furnace
+  } else if (window_id == 14) { // Furnace
     getSmeltingOutput(player);
     for (int i = 0; i < 3; i ++) {
       sc_setContainerSlot(client_fd, window_id, i, player->craft_count[i], player->craft_items[i]);
     }
   }
 
-  // assign cursor-carried item slot
+  // Assign cursor-carried item slot
   if (readByte(client_fd)) {
     player->flagval_16 = readVarInt(client_fd);
     player->flagval_8 = readVarInt(client_fd);
-    // ignore components
+    // Ignore components
     readLengthPrefixedData(client_fd);
     readLengthPrefixedData(client_fd);
   } else {
@@ -840,8 +840,8 @@ int cs_closeContainer (int client_fd) {
   PlayerData *player;
   if (getPlayerData(client_fd, &player)) return 1;
 
-  // return all items in crafting slots to the player
-  // or, in the case of chests, simply clear the storage pointer
+  // Return all items in crafting slots to the player
+  // Or, in the case of chests, simply clear the storage pointer
   for (uint8_t i = 0; i < 9; i ++) {
     if (window_id != 2) {
       givePlayerItem(player, player->craft_items[i], player->craft_count[i]);
@@ -1056,29 +1056,29 @@ int sc_respawn (int client_fd) {
   writeVarInt(client_fd, 28);
   writeByte(client_fd, 0x4B);
 
-  // dimension id (from server-sent registries)
+  // Dimension id (from server-sent registries)
   writeVarInt(client_fd, 0);
-  // dimension name
+  // Dimension name
   const char *dimension = "overworld";
   writeVarInt(client_fd, 9);
   send_all(client_fd, dimension, 9);
-  // hashed seed
+  // Hashed seed
   writeUint64(client_fd, 0x0123456789ABCDEF);
-  // gamemode
+  // Gamemode
   writeByte(client_fd, GAMEMODE);
-  // previous gamemode
+  // Previous gamemode
   writeByte(client_fd, 0xFF);
-  // is debug
+  // Is debug
   writeByte(client_fd, 0);
-  // is flat
+  // Is flat
   writeByte(client_fd, 0);
-  // has death location
+  // Has death location
   writeByte(client_fd, 0);
-  // portal cooldown
+  // Portal cooldown
   writeVarInt(client_fd, 0);
-  // sea level
+  // Sea level
   writeVarInt(client_fd, 63);
-  // data kept
+  // Data kept
   writeByte(client_fd, 0);
 
   return 0;

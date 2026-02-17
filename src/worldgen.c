@@ -52,9 +52,9 @@ uint8_t getChunkBiome (short x, short z) {
 
   // The biome itself is plucked directly from the world seed.
   // The 32-bit seed is treated as a 4x4 biome matrix, with each biome
-  // taking up 2 bytes. This is why there are only 4 biomes, excluding
-  // beaches. Using the world seed as a repeating pattern avoids
-  // having to generate and layer yet another hash.
+  // Taking up 2 bytes. This is why there are only 4 biomes, excluding
+  // Beaches. Using the world seed as a repeating pattern avoids
+  // Having to generate and layer yet another hash.
   uint8_t index = abs((biome_x & 3) + ((biome_z * 4) & 15));
   return (world_seed >> (index * 2)) & 3;
 
@@ -64,7 +64,7 @@ uint8_t getCornerHeight (uint32_t hash, uint8_t biome) {
 
   // When calculating the height, parts of the hash are used as random values.
   // Often, multiple values are stacked to stabilize the distribution while
-  // allowing for occasionally larger variances.
+  // Allowing for occasionally larger variances.
   uint8_t height = TERRAIN_BASE_HEIGHT;
 
   uint8_t variant = (hash >> 20) & 3;
@@ -92,8 +92,8 @@ uint8_t getCornerHeight (uint32_t hash, uint8_t biome) {
         (hash >> 12 & 3)
       );
       // Add extra "micro-biome" variation without changing protocol biomes.
-      if (variant == 0) height += 4;         // plateaus
-      else if (variant == 1 && height > 6) height -= 6; // valleys
+      if (variant == 0) height += 4;         // Plateaus
+      else if (variant == 1 && height > 6) height -= 6; // Valleys
       break;
     }
 
@@ -102,7 +102,7 @@ uint8_t getCornerHeight (uint32_t hash, uint8_t biome) {
         (hash & 3) +
         (hash >> 4 & 3)
       );
-      if (variant == 2) height += 5; // dunes
+      if (variant == 2) height += 5; // Dunes
       break;
     }
 
@@ -122,7 +122,7 @@ uint8_t getCornerHeight (uint32_t hash, uint8_t biome) {
         (hash & 7) +
         (hash >> 4 & 7)
       );
-      if (variant == 3 && height > 8) height -= 8; // frozen basins
+      if (variant == 3 && height > 8) height -= 8; // Frozen basins
       break;
     }
 
@@ -141,7 +141,7 @@ uint8_t interpolate (uint8_t a, uint8_t b, uint8_t c, uint8_t d, int x, int z) {
 
 // Calculates terrain height using a pointer to an array of anchors
 // The pointer should point towards the minichunk containing the desired
-// coordinates, with available neighbors on +X and +Z.
+// Coordinates, with available neighbors on +X and +Z.
 uint8_t getHeightAtFromAnchors (int rx, int rz, ChunkAnchor *anchor_ptr) {
 
   if (rx == 0 && rz == 0) {
@@ -219,7 +219,7 @@ uint8_t getTerrainAtFromCache (int x, int y, int z, int rx, int rz, ChunkAnchor 
       }
 
       // Since we're sure that we're above sea level and in a plains biome,
-      // there's no need to drop down to decide the surrounding blocks.
+      // There's no need to drop down to decide the surrounding blocks.
       if (y == height) return B_grass_block;
       return B_air;
     }
@@ -232,7 +232,7 @@ uint8_t getTerrainAtFromCache (int x, int y, int z, int rx, int rz, ChunkAnchor 
         if (y == height + 1) return B_dead_bush;
       } else if (y > height) {
         // The size of the cactus is determined based on whether the terrain
-        // height is even or odd at the target location
+        // Height is even or odd at the target location
         if (height & 1 && y <= height + 3) return B_cactus;
         if (y <= height + 2) return B_cactus;
       }
@@ -290,9 +290,9 @@ uint8_t getTerrainAtFromCache (int x, int y, int z, int rx, int rz, ChunkAnchor 
     if (y < CAVE_BASE_DEPTH + gap && y > CAVE_BASE_DEPTH - gap) return B_air;
 
     // The chunk-relative X and Z coordinates are used as the seed for an
-    // xorshift RNG/hash function to generate the Y coordinate of the ore
-    // in this column. This way, each column is guaranteed to have exactly
-    // one ore candidate, as there will always be a Y value to reference.
+    // Xorshift RNG/hash function to generate the Y coordinate of the ore
+    // In this column. This way, each column is guaranteed to have exactly
+    // One ore candidate, as there will always be a Y value to reference.
     uint8_t ore_y = ((rx & 15) << 4) + (rz & 15);
     ore_y ^= ore_y << 4;
     ore_y ^= ore_y >> 5;
@@ -301,8 +301,8 @@ uint8_t getTerrainAtFromCache (int x, int y, int z, int rx, int rz, ChunkAnchor 
 
     if (y == ore_y) {
       // Since the ore Y coordinate is effectely a random number in range [0;64),
-      // we use it in a bit shift with the chunk's anchor hash to get another
-      // pseudo-random number for the ore's rarity.
+      // We use it in a bit shift with the chunk's anchor hash to get another
+      // Pseudo-random number for the ore's rarity.
       uint8_t ore_probability = (anchor.hash >> (ore_y % 24)) & 255;
       // Ore placement is determined by Y level and "probability"
       if (y < 15) {
@@ -352,9 +352,9 @@ ChunkFeature getFeatureFromAnchor (ChunkAnchor anchor) {
   uint8_t skip_feature = false;
 
   // The following check does two things:
-  //  firstly, it ensures that trees don't cross chunk boundaries;
-  //  secondly, it reduces overall feature count. This is favorable
-  //  everywhere except for swamps, which are otherwise very boring.
+  // Firstly, it ensures that trees don't cross chunk boundaries;
+  // Secondly, it reduces overall feature count. This is favorable
+  // Everywhere except for swamps, which are otherwise very boring.
   if (anchor.biome != W_mangrove_swamp) {
     if (feature.x < 3 || feature.x > CHUNK_SIZE - 3) skip_feature = true;
     else if (feature.z < 3 || feature.z > CHUNK_SIZE - 3) skip_feature = true;
@@ -499,15 +499,15 @@ uint8_t buildChunkSection (int cx, int cy, int cz) {
   // Generate 4096 blocks in one buffer to reduce overhead
   for (int j = 0; j < 4096; j += 8) {
     // These values don't change in the lower array,
-    // since all of the operations are on multiples of 8
+    // Since all of the operations are on multiples of 8
     int y = j / 256 + cy;
     int rz = j / 16 % 16;
     int rz_mod = rz % CHUNK_SIZE;
     feature_index = (j % 16) / CHUNK_SIZE + (j / 16 % 16) / CHUNK_SIZE * (16 / CHUNK_SIZE);
     anchor_index = (j % 16) / CHUNK_SIZE + (j / 16 % 16) / CHUNK_SIZE * (16 / CHUNK_SIZE + 1);
     // The client expects "big-endian longs", which in our
-    // case means reversing the order in which we store/send
-    // each 8 block sequence.
+    // Case means reversing the order in which we store/send
+    // Each 8 block sequence.
     for (int offset = 7; offset >= 0; offset--) {
       int k = j + offset;
       int rx = k % 16;
@@ -524,8 +524,8 @@ uint8_t buildChunkSection (int cx, int cy, int cz) {
 
   // Apply block changes on top of terrain
   // This does mean that we're generating some terrain only to replace it,
-  // but it's better to apply changes in one run rather than in individual
-  // runs per block, as this is more expensive than terrain generation.
+  // But it's better to apply changes in one run rather than in individual
+  // Runs per block, as this is more expensive than terrain generation.
   for (int i = 0; i < block_changes_count; i ++) {
     if (block_changes[i].block == 0xFF) continue;
     // Skip blocks that behave better when sent using a block update
@@ -542,7 +542,7 @@ uint8_t buildChunkSection (int cx, int cy, int cz) {
       int dy = block_changes[i].y - cy;
       int dz = block_changes[i].z - cz;
       // Same 8-block sequence reversal as before, this time 10x dirtier
-      // because we're working with specific indexes.
+      // Because we're working with specific indexes.
       unsigned address = (unsigned)(dx + (dz << 4) + (dy << 8));
       unsigned index = (address & ~7u) | (7u - (address & 7u));
       chunk_section[index] = block_changes[i].block;

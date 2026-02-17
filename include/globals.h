@@ -18,8 +18,8 @@
 // TCP port, Minecraft's default is 25565
 #define PORT 25565
 
-// How many players to keep in memory, NOT the amount of concurrent players
-// Even when offline, players who have logged on before take up a slot
+// Player records kept in memory (not concurrent sessions).
+// Previously seen players still occupy slots while offline.
 #define MAX_PLAYERS 16
 
 // How many mobs to allocate memory for
@@ -37,7 +37,7 @@
 // Max render distance, determines how many chunks to send
 #define VIEW_DISTANCE 2
 
-// Time between server ticks in microseconds (default = 1s)
+// Tick interval in microseconds (default 1s).
 #define TIME_BETWEEN_TICKS 1000000
 
 // Average passive spawn chance for newly discovered chunks (1 / N)
@@ -53,126 +53,94 @@
 // Calculated from TIME_BETWEEN_TICKS
 #define TICKS_PER_SECOND ((float)1000000 / TIME_BETWEEN_TICKS)
 
-// Initial world generation seed, will be hashed on startup
-// Used in generating terrain and biomes
+// Initial terrain/biome seed, hashed at startup.
 #define INITIAL_WORLD_SEED 0xA103DE6C
 
-// Initial general RNG seed, will be hashed on startup
-// Used in random game events like item drops and mob behavior
+// Initial gameplay RNG seed, hashed at startup.
 #define INITIAL_RNG_SEED 0xE2B9419
 
-// Size of each bilinearly interpolated area ("minichunk")
-// For best performance, CHUNK_SIZE should be a power of 2
+// Size of each interpolated terrain area; prefer powers of two.
 #define CHUNK_SIZE 8
 
-// Terrain low point - should start a bit below sea level for rivers/lakes
+// Baseline terrain elevation.
 #define TERRAIN_BASE_HEIGHT 60
 
 // Cave generation Y level
 #define CAVE_BASE_DEPTH 24
 
-// Size of every major biome in multiples of CHUNK_SIZE
-// For best performance, should also be a power of 2
+// Biome span in multiples of CHUNK_SIZE; prefer powers of two.
 #define BIOME_SIZE (CHUNK_SIZE * 8)
 
 // Calculated from BIOME_SIZE
 #define BIOME_RADIUS (BIOME_SIZE / 2)
 
-// How many visited chunk coordinates to "remember"
-// The server will not re-send chunks that the player has recently been in
-// Must be at least 1, otherwise chunks will be sent on each position update
+// Per-player recently visited chunk history.
+// Chunks in this window are not re-sent on movement updates.
+// Must be at least 1.
 #define VISITED_HISTORY 4
 
-// How many player-made block changes to allow
-// Determines the fixed amount of memory allocated to blocks
+// Maximum persisted player block changes.
 #define MAX_BLOCK_CHANGES 20000
 
-// If defined, writes and reads world data to/from disk (or flash).
-// This is a synchronous operation, and can cause performance issues if
-// frequent random disk access is slow. Data is still stored in and
-// accessed from memory - reading from disk is only done on startup.
-// When targeting ESP-IDF, LittleFS is used to manage flash reads and
-// writes. Flash is typically *very* slow and unreliable, which is why
-// this option is disabled by default when targeting ESP-IDF.
+// Enables synchronous world persistence to disk/flash.
+// Runtime state stays in memory; disk is read on startup and written on updates.
+// Disabled by default on ESP because flash writes are expensive.
 #ifndef ESP_PLATFORM
   #define SYNC_WORLD_TO_DISK
 #endif
 
-// The minimum interval (in microseconds) at which certain data is written
-// to disk/flash. Bounded on the low end by TIME_BETWEEN_TICKS. By default,
-// applies only to player data. Block changes are written as soon as they
-// are made, but in much smaller portions. Set DISK_SYNC_BLOCKS_ON_INTERVAL
-// to make this apply to block changes as well.
+// Minimum interval for periodic disk flushes (microseconds).
+// Applies to player data by default; block changes can opt in below.
 #define DISK_SYNC_INTERVAL 15000000
 
-// Whether to sync block changes to disk on an interval, instead of syncing
-// on each change. On systems with fast random disk access, this shouldn't
-// be necessary.
+// Flush block changes on interval instead of per-change writes.
 // #define DISK_SYNC_BLOCKS_ON_INTERVAL
 
-// Time in microseconds to spend waiting for data transmission before
-// timing out. Default is 15s, which leaves 5s to prevent starving other
-// clients from Keep Alive packets.
+// Socket progress timeout in microseconds.
 #define NETWORK_TIMEOUT_TIME 15000000
 
 // Size of the receive buffer for incoming string data
 #define MAX_RECV_BUF_LEN 256
 
-// If defined, sends the server brand to clients. Doesn't do much, but will
-// show up in the top-left of the F3/debug menu, in the Minecraft client.
-// You can change the brand string in the "brand" variable in src/globals.c
+// Sends server brand string to clients (debug screen / F3).
+// Brand text is defined in src/globals.c.
 #define SEND_BRAND
 
-// If defined, rebroadcasts ALL incoming movement updates, disconnecting
-// movement from the server's tickrate. This makes movement much smoother
-// on very low tickrates, at the cost of potential network instability when
-// hosting more than just a couple of players. When disabling this on low
-// tickrates, consider disabling SCALE_MOVEMENT_UPDATES_TO_PLAYER_COUNT too.
+// Rebroadcast all movement packets immediately, independent of tick rate.
+// Improves smoothness on low tick rates at higher network cost.
 #define BROADCAST_ALL_MOVEMENT
 
-// If defined, scales the frequency at which player movement updates are
-// broadcast based on the amount of players, reducing overhead for higher
-// player counts. For very many players, makes movement look jittery.
-// It is not recommended to use this if BROADCAST_ALL_MOVEMENT is disabled
-// on low tickrates, as that might drastically decrease the update rate.
+// Scale movement rebroadcast cadence by active player count.
+// Reduces bandwidth but can make movement appear jittery.
 #define SCALE_MOVEMENT_UPDATES_TO_PLAYER_COUNT
 
-// If defined, calculates fluid flow when blocks are updated near fluids
-// Somewhat computationally expensive and potentially unstable
+// Simulate fluid flow near block updates.
 #define DO_FLUID_FLOW
 
-// If defined, allows players to craft and use chests.
-// Chests take up 15 block change slots each, require additional checks,
-// and use some terrible memory hacks to function. On some platforms, this
-// could cause bad performance or even crashes during gameplay.
+// Enable chest interaction and persistence.
+// Each chest consumes 15 block-change slots and adds bookkeeping overhead.
 #define ALLOW_CHESTS
 
-// If defined, enables flight for all players. As a side-effect, allows
-// players to sprint when starving.
+// Enable flight for all players.
 // #define ENABLE_PLAYER_FLIGHT
 
-// If defined, enables the item pickup animation when mining a block/
-// Does not affect how item pickups work! Items from broken blocks still
-// get placed directly in the inventory, this is just an animation.
-// Relatively inexpensive, though requires sending a few more packets
-// every time a block is broken.
+// Enable item pickup animation on block break.
+// Items are still inserted directly into inventory.
 #define ENABLE_PICKUP_ANIMATION
 
 // If defined, players are able to receive damage from nearby cacti.
 #define ENABLE_CACTUS_DAMAGE
 
-// If defined, logs unrecognized packet IDs
+// Log unrecognized packet IDs.
 // #define DEV_LOG_UNKNOWN_PACKETS
 
-// If defined, logs cases when packet length doesn't match parsed byte count
+// Log packet parse length mismatches.
 #define DEV_LOG_LENGTH_DISCREPANCY
 
-// If defined, log chunk generation events
+// Log chunk generation timings.
 // #define DEV_LOG_CHUNK_GENERATION
 
-// If defined, allows dumping world data by sending 0xBEEF (big-endian),
-// and uploading world data by sending 0xFEED, followed by the data buffer.
-// Doesn't implement authentication, hence disabled by default.
+// Enable unauthenticated raw world dump/import commands (0xBEEF / 0xFEED).
 // #define DEV_ENABLE_BEEF_DUMPS
 
 #define STATE_NONE 0
@@ -233,33 +201,32 @@ typedef struct {
   uint16_t craft_items[9];
   uint8_t inventory_count[41];
   uint8_t craft_count[9];
-  // Usage depends on player's flags, see below
-  // When no flags are set, acts as cursor item ID
+  // Multi-purpose 16-bit field; meaning depends on flags.
+  // With no special flags, stores cursor item ID.
   uint16_t flagval_16;
-  // Usage depends on player's flags, see below
-  // When no flags are set, acts as cursor item count
+  // Multi-purpose 8-bit field; meaning depends on flags.
+  // With no special flags, stores cursor item count.
   uint8_t flagval_8;
-  // 0x01 - attack cooldown, uses flagval_8 as the timer
-  // 0x02 - has not spawned yet
-  // 0x04 - sneaking
-  // 0x08 - sprinting
-  // 0x10 - eating, makes flagval_16 act as eating timer
-  // 0x20 - client loading, uses flagval_16 as fallback timer
-  // 0x40 - movement update cooldown
-  // 0x80 - craft_items lock (for storing pointers)
+  // 0x01: attack cooldown (uses flagval_8 timer)
+  // 0x02: not spawned yet
+  // 0x04: sneaking
+  // 0x08: sprinting
+  // 0x10: eating (uses flagval_16 timer)
+  // 0x20: client loading (uses flagval_16 fallback timer)
+  // 0x40: movement update cooldown
+  // 0x80: craft_items lock (pointer storage)
   uint8_t flags;
 } PlayerData;
 
 typedef struct {
   uint8_t type;
   short x;
-  // When the mob is dead (health is 0), the Y coordinate acts
-  // as a timer for deleting and deallocating the mob
+  // When health is zero, y stores despawn timer.
   uint8_t y;
   short z;
-  // Lower 5 bits: health
-  // Middle 1 bit: sheep sheared, unused for other mobs
-  // Upper 2 bits: panic timer
+  // Bits 0-4: health
+  // Bit 5: sheep sheared flag (unused for other mobs)
+  // Bits 6-7: panic timer
   uint8_t data;
 } MobData;
 
@@ -272,8 +239,7 @@ union EntityDataValue {
 
 typedef struct {
   uint8_t index;
-  // 0 - Byte
-  // 21 - Pose
+  // 0 = Byte, 21 = Pose
   int type;
   union EntityDataValue value;
 } EntityData;

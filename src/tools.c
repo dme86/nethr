@@ -37,35 +37,33 @@
   }
 #endif
 
-// Keep track of the total amount of bytes received with recv_all
-// Helps notice misread packets and clean up after errors
+// Total bytes read via recv_all; used for packet length reconciliation.
 uint64_t total_bytes_received = 0;
 
 ssize_t recv_all (int client_fd, void *buf, size_t n, uint8_t require_first) {
   char *p = buf;
   size_t total = 0;
 
-  // Track time of last meaningful network update
-  // Used to handle timeout when client is stalling
+  // Timestamp of last successful socket progress.
   int64_t last_update_time = get_program_time();
 
-  // If requested, exit early when first byte not immediately available
+  // Optionally return early when no first byte is immediately available.
   if (require_first) {
     ssize_t r = recv(client_fd, p, 1, MSG_PEEK);
     if (r <= 0) {
       if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-        return 0; // no first byte available yet
+        return 0; // No first byte available yet.
       }
-      return -1; // error or connection closed
+      return -1; // Socket error or closed connection.
     }
   }
 
-  // Busy-wait (with task yielding) until we get exactly n bytes
+  // Keep reading until exactly n bytes are received.
   while (total < n) {
     ssize_t r = recv(client_fd, p + total, n - total, 0);
     if (r < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        // handle network timeout
+        // Enforce I/O timeout while socket is stalled.
         if (get_program_time() - last_update_time > NETWORK_TIMEOUT_TIME) {
           disconnectClient(&client_fd, -1);
           return -1;
@@ -74,10 +72,10 @@ ssize_t recv_all (int client_fd, void *buf, size_t n, uint8_t require_first) {
         continue;
       } else {
         total_bytes_received += total;
-        return -1; // real error
+        return -1; // Unrecoverable socket error.
       }
     } else if (r == 0) {
-      // connection closed before full read
+      // Peer closed connection before full read.
       total_bytes_received += total;
       return total;
     }
@@ -86,42 +84,41 @@ ssize_t recv_all (int client_fd, void *buf, size_t n, uint8_t require_first) {
   }
 
   total_bytes_received += total;
-  return total; // got exactly n bytes
+  return total; // Full read completed.
 }
 
 ssize_t send_all (int client_fd, const void *buf, ssize_t len) {
-  // Treat any input buffer as *uint8_t for simplicity
+  // Serialize buffer as raw bytes.
   const uint8_t *p = (const uint8_t *)buf;
   ssize_t sent = 0;
 
-  // Track time of last meaningful network update
-  // Used to handle timeout when client is stalling
+  // Timestamp of last successful socket progress.
   int64_t last_update_time = get_program_time();
 
-  // Busy-wait (with task yielding) until all data has been sent
+  // Keep sending until all bytes are written.
   while (sent < len) {
     #ifdef _WIN32
       ssize_t n = send(client_fd, p + sent, len - sent, 0);
     #else
       ssize_t n = send(client_fd, p + sent, len - sent, MSG_NOSIGNAL);
     #endif
-    if (n > 0) { // some data was sent, log it
+    if (n > 0) { // Some data was sent.
       sent += n;
       last_update_time = get_program_time();
       continue;
     }
-    if (n == 0) { // connection was closed, treat this as an error
+    if (n == 0) { // Peer closed connection.
       errno = ECONNRESET;
       return -1;
     }
-    // not yet ready to transmit, try again
-    #ifdef _WIN32 //handles windows socket timeout
+    // Retry on transient socket conditions.
+    #ifdef _WIN32 // Handle WinSock non-blocking retry codes.
       int err = WSAGetLastError();
       if (err == WSAEWOULDBLOCK || err == WSAEINTR) {
     #else
     if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
     #endif
-      // handle network timeout
+      // Enforce I/O timeout while socket is stalled.
       if (get_program_time() - last_update_time > NETWORK_TIMEOUT_TIME) {
         disconnectClient(&client_fd, -2);
         return -1;
@@ -129,7 +126,7 @@ ssize_t send_all (int client_fd, const void *buf, ssize_t len) {
       task_yield();
       continue;
     }
-    return -1; // real error
+    return -1; // Unrecoverable socket error.
   }
 
   return sent;
@@ -228,7 +225,7 @@ double readDouble (int client_fd) {
   return output;
 }
 
-// Receive length prefixed data with bounds checking
+// Reads a length-prefixed payload into recv_buffer with bounds checking.
 ssize_t readLengthPrefixedData (int client_fd) {
   uint32_t length = readVarInt(client_fd);
   if (length >= MAX_RECV_BUF_LEN) {
@@ -240,26 +237,26 @@ ssize_t readLengthPrefixedData (int client_fd) {
   return recv_all(client_fd, recv_buffer, length, false);
 }
 
-// Reads a networked string into recv_buffer
+// Reads a protocol string into recv_buffer.
 void readString (int client_fd) {
   recv_count = readLengthPrefixedData(client_fd);
   recv_buffer[recv_count] = '\0';
 }
-// Reads a networked string of up to N bytes into recv_buffer
+// Reads a protocol string capped at max_length bytes.
 void readStringN (int client_fd, uint32_t max_length) {
-  // Forward to readString if max length is invalid
+  // Fallback to uncapped path if cap exceeds buffer size.
   if (max_length >= MAX_RECV_BUF_LEN) {
     readString(client_fd);
     return;
   }
-  // Attempt to read full string within maximum
+  // Read full string if it is within cap.
   uint32_t length = readVarInt(client_fd);
   if (max_length > length) {
     recv_count = recv_all(client_fd, recv_buffer, length, false);
     recv_buffer[recv_count] = '\0';
     return;
   }
-  // Read string up to maximum, dump the rest
+  // Read up to cap, discard remaining bytes from wire.
   recv_count = recv_all(client_fd, recv_buffer, max_length, false);
   recv_buffer[recv_count] = '\0';
   uint8_t dummy;
@@ -283,10 +280,7 @@ uint64_t splitmix64 (uint64_t state) {
 }
 
 #ifndef ESP_PLATFORM
-// Returns system time in microseconds.
-// On ESP-IDF, this is available in "esp_timer.h", and returns time *since
-// the start of the program*, and NOT wall clock time. To ensure
-// compatibility, this should only be used to measure time intervals.
+// Returns monotonic time in microseconds for interval measurements.
 int64_t get_program_time () {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);

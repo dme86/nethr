@@ -1,6 +1,7 @@
 .DEFAULT_GOAL := help
 
 SHELL := /bin/bash
+CC ?= gcc
 
 MC_VERSION ?= 1.21.8
 SERVER_JAR ?= notchian/server.jar
@@ -8,16 +9,31 @@ SERVER_JAR_URL ?= https://piston-data.mojang.com/v1/objects/6bce4ef400e4efaa63a1
 
 JAVA_BIN ?= $(if $(wildcard .deps/jdk/Contents/Home/bin/java),$(abspath .deps/jdk/Contents/Home/bin/java),java)
 NODE_BIN ?= $(if $(wildcard .deps/node/bin/node),$(abspath .deps/node/bin/node),node)
+LINT_CFLAGS ?= -std=gnu11 -fsyntax-only -Wformat -Werror=format-security -Werror=implicit-function-declaration -Werror=implicit-int -Werror=return-type -Werror=int-conversion -Werror=incompatible-pointer-types
 
-.PHONY: help tools-check download-jar registries build run all clean clean-cache distclean
+.PHONY: help tools-check doctor asdf-check asdf-install lint download-jar registries build run all clean clean-cache distclean
 
 help: ## Show this help message.
 	@awk 'BEGIN {FS = ":.*##"; printf "\nTargets:\n"} /^[a-zA-Z0-9_.-]+:.*##/ { printf "  %-14s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
 tools-check: ## Check whether required tools are available.
 	@command -v curl >/dev/null || (echo "Missing tool: curl" && exit 1)
+	@command -v $(CC) >/dev/null || (echo "Missing C compiler: $(CC)" && exit 1)
 	@command -v $(JAVA_BIN) >/dev/null || (echo "Missing Java binary: $(JAVA_BIN)" && exit 1)
-	@command -v node >/dev/null || command -v bun >/dev/null || command -v deno >/dev/null || (echo "Missing JS runtime: install node, bun, or deno" && exit 1)
+	@command -v $(NODE_BIN) >/dev/null || (echo "Missing Node.js binary: $(NODE_BIN)" && exit 1)
+
+asdf-check: ## Verify asdf plugins and pinned tool versions from .tool-versions.
+	@./scripts/asdf-bootstrap.sh --check
+
+asdf-install: ## Install missing asdf plugins and pinned tool versions from .tool-versions.
+	@./scripts/asdf-bootstrap.sh --install
+
+lint: ## Run compile-time lint checks for critical C issues.
+	@$(CC) src/*.c -Iinclude $(LINT_CFLAGS)
+	@echo "Lint passed"
+
+doctor: tools-check lint ## Run project health checks (toolchain + lint).
+	@echo "Doctor checks passed"
 
 download-jar: ## Download Minecraft server JAR to notchian/server.jar (override SERVER_JAR_URL if needed).
 	@mkdir -p $(dir $(SERVER_JAR))
@@ -33,7 +49,7 @@ registries: download-jar ## Generate include/registries.h and src/registries.c.
 	@PATH="$(abspath .deps/jdk/Contents/Home/bin):$(abspath .deps/node/bin):$$PATH" SERVER_JAR="$(notdir $(SERVER_JAR))" ./extract_registries.sh
 
 build: include/registries.h src/registries.c ## Build nethr binary.
-	@gcc src/*.c -O2 -Iinclude -o nethr
+	@$(CC) src/*.c -O2 -Iinclude -o nethr
 	@echo "Built ./nethr"
 
 run: build ## Run server binary.

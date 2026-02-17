@@ -67,7 +67,7 @@ int getClientIndex (int client_fd) {
   return -1;
 }
 
-// Restores player data to initial state (fresh spawn)
+// Resets player runtime state to default spawn values.
 void resetPlayerData (PlayerData *player) {
   player->health = 20;
   player->hunger = 20;
@@ -88,7 +88,7 @@ void resetPlayerData (PlayerData *player) {
   player->flags &= ~0x80;
 }
 
-// Assigns the given data to a player_data entry
+// Binds login identity to an existing or free player slot.
 int reservePlayerData (int client_fd, uint8_t *uuid, char *name) {
 
   for (int i = 0; i < MAX_PLAYERS; i ++) {
@@ -143,7 +143,7 @@ int getPlayerData (int client_fd, PlayerData **output) {
   return 1;
 }
 
-// Returns the player with the given name, or NULL if not found
+// Returns player by exact name slice, or NULL when not found.
 PlayerData *getPlayerByName (int start_offset, int end_offset, uint8_t *buffer) {
   for (int i = 0; i < MAX_PLAYERS; i ++) {
     if (player_data[i].client_fd == -1) continue;
@@ -159,7 +159,7 @@ PlayerData *getPlayerByName (int start_offset, int end_offset, uint8_t *buffer) 
 }
 
 
-// Marks a client as disconnected and cleans up player data
+// Handles disconnect cleanup and leave broadcast.
 void handlePlayerDisconnect (int client_fd) {
   // Search for a corresponding player in the player data array
   for (int i = 0; i < MAX_PLAYERS; i ++) {
@@ -191,7 +191,7 @@ void handlePlayerDisconnect (int client_fd) {
   }
 }
 
-// Marks a client as connected and broadcasts their data to other players
+// Finalizes join and announces player to connected clients.
 void handlePlayerJoin (PlayerData* player) {
 
   // Prepare join message for broadcast
@@ -233,7 +233,7 @@ void disconnectClient (int *client_fd, int cause) {
 
 uint8_t serverSlotToClientSlot (int window_id, uint8_t slot) {
 
-  if (window_id == 0) { // player inventory
+  if (window_id == 0) { // Player inventory
 
     if (slot < 9) return slot + 36;
     if (slot >= 9 && slot <= 35) return slot;
@@ -241,12 +241,12 @@ uint8_t serverSlotToClientSlot (int window_id, uint8_t slot) {
     if (slot >= 36 && slot <= 39) return 44 - slot;
     if (slot >= 41 && slot <= 44) return slot - 40;
 
-  } else if (window_id == 12) { // crafting table
+  } else if (window_id == 12) { // Crafting table
 
     if (slot >= 41 && slot <= 49) return slot - 40;
     return serverSlotToClientSlot(0, slot - 1);
 
-  } else if (window_id == 14) { // furnace
+  } else if (window_id == 14) { // Furnace
 
     if (slot >= 41 && slot <= 43) return slot - 41;
     return serverSlotToClientSlot(0, slot + 6);
@@ -258,43 +258,43 @@ uint8_t serverSlotToClientSlot (int window_id, uint8_t slot) {
 
 uint8_t clientSlotToServerSlot (int window_id, uint8_t slot) {
 
-  if (window_id == 0) { // player inventory
+  if (window_id == 0) { // Player inventory
 
     if (slot >= 36 && slot <= 44) return slot - 36;
     if (slot >= 9 && slot <= 35) return slot;
     if (slot == 45) return 40;
     if (slot >= 5 && slot <= 8) return 44 - slot;
 
-    // map inventory crafting slots to player data crafting grid (semi-hack)
-    // this abuses the fact that the buffers are adjacent in player data
+    // Map 2x2 crafting UI slots into craft buffer offsets.
+    // This relies on adjacent craft/inventory buffers in PlayerData.
     if (slot == 1) return 41;
     if (slot == 2) return 42;
     if (slot == 3) return 44;
     if (slot == 4) return 45;
 
-  } else if (window_id == 12) { // crafting table
+  } else if (window_id == 12) { // Crafting table
 
-    // same crafting offset overflow hack as above
+    // 3x3 crafting grid mapped into craft buffer.
     if (slot >= 1 && slot <= 9) return 40 + slot;
-    // the rest of the slots are identical, just shifted by one
+    // The rest of the slots are identical, just shifted by one
     if (slot >= 10 && slot <= 45) return clientSlotToServerSlot(0, slot - 1);
 
-  } else if (window_id == 14) { // furnace
+  } else if (window_id == 14) { // Furnace
 
-    // move furnace items to the player's crafting grid
-    // this lets us put them back in the inventory once the window closes
+    // Reuse craft buffer for temporary furnace slots.
+    // This allows items to be restored on container close.
     if (slot <= 2) return 41 + slot;
-    // the rest of the slots are identical, just shifted by 6
+    // The rest of the slots are identical, just shifted by 6
     if (slot >= 3 && slot <= 38) return clientSlotToServerSlot(0, slot + 6);
 
   }
   #ifdef ALLOW_CHESTS
-  else if (window_id == 2) { // chest
+  else if (window_id == 2) { // Chest
 
-    // overflow chest slots into crafting grid
-    // technically invalid, expected to be handled on a per-case basis
+    // Temporarily map chest slots into craft buffer.
+    // Slot mapping is normalized by container-specific handlers.
     if (slot <= 26) return 41 + slot;
-    // the rest of the slots are identical, just shifted by 18
+    // The rest of the slots are identical, just shifted by 18
     if (slot >= 27 && slot <= 62) return clientSlotToServerSlot(0, slot - 18);
 
   }
@@ -337,7 +337,7 @@ int givePlayerItem (PlayerData *player, uint16_t item, uint8_t count) {
 
 }
 
-// Sends the full sequence for spawning the player to the client
+// Sends the full login/play spawn sequence for one player.
 void spawnPlayer (PlayerData *player) {
 
   // Player spawn coordinates, initialized to placeholders
@@ -361,7 +361,7 @@ void spawnPlayer (PlayerData *player) {
   // Teleport player to spawn coordinates (first pass)
   sc_synchronizePlayerPosition(player->client_fd, spawn_x, spawn_y, spawn_z, spawn_yaw, spawn_pitch);
 
-  task_yield(); // Check task timer between packets
+  task_yield(); // Yield between packet bursts.
 
   // Clear crafting grid residue, unlock craft_items
   for (int i = 0; i < 9; i++) {
@@ -382,7 +382,7 @@ void spawnPlayer (PlayerData *player) {
 
   #ifdef ENABLE_PLAYER_FLIGHT
   if (GAMEMODE != 1 && GAMEMODE != 3) {
-    // Give the player flight (for testing)
+    // Grant flight in non-creative/spectator for testing builds.
     sc_playerAbilities(player->client_fd, 0x04);
   }
   #endif
@@ -395,7 +395,7 @@ void spawnPlayer (PlayerData *player) {
   sc_startWaitingForChunks(player->client_fd);
   sc_setCenterChunk(player->client_fd, _x, _z);
 
-  task_yield(); // Check task timer between packets
+  task_yield(); // Yield between packet bursts.
 
   // Send spawn chunk first
   sc_chunkDataAndUpdateLight(player->client_fd, _x, _z);
@@ -408,11 +408,11 @@ void spawnPlayer (PlayerData *player) {
   // Re-teleport player after all chunks have been sent
   sc_synchronizePlayerPosition(player->client_fd, spawn_x, spawn_y, spawn_z, spawn_yaw, spawn_pitch);
 
-  task_yield(); // Check task timer between packets
+  task_yield(); // Yield between packet bursts.
 
 }
 
-// Broadcasts a player's entity metadata (sneak/sprint state) to other players
+// Broadcasts player posture/sprint metadata to other clients.
 void broadcastPlayerMetadata (PlayerData *player) {
   uint8_t sneaking = (player->flags & 0x04) != 0;
   uint8_t sprinting = (player->flags & 0x08) != 0;
@@ -449,8 +449,7 @@ void broadcastPlayerMetadata (PlayerData *player) {
   }
 }
 
-// Sends a mob's entity metadata to the given player.
-// If client_fd is -1, broadcasts to all player
+// Sends mob metadata to one client, or broadcasts when client_fd == -1.
 void broadcastMobMetadata (int client_fd, int entity_id) {
 
   int mob_index = -entity_id - 2;
@@ -508,7 +507,7 @@ uint8_t getBlockChange (short x, uint8_t y, short z) {
   return 0xFF;
 }
 
-// Handle running out of memory for new block changes
+// Handles exhaustion of block_change capacity.
 void failBlockChange (short x, uint8_t y, short z, uint8_t block) {
 
   // Get previous block at this location
@@ -537,7 +536,7 @@ uint8_t makeBlockChange (short x, uint8_t y, short z, uint8_t block) {
 
   // Calculate terrain at these coordinates and compare it to the input block.
   // Since block changes get overlayed on top of terrain, we don't want to
-  // store blocks that don't differ from the base terrain.
+  // Store blocks that don't differ from the base terrain.
   ChunkAnchor anchor = {
     x / CHUNK_SIZE,
     z / CHUNK_SIZE
@@ -551,7 +550,7 @@ uint8_t makeBlockChange (short x, uint8_t y, short z, uint8_t block) {
 
   // In the block_changes array, 0xFF indicates a missing/restored entry.
   // We track the position of the first such "gap" for when the operation
-  // isn't replacing an existing block change.
+  // Isn't replacing an existing block change.
   int first_gap = block_changes_count;
 
   // Prioritize replacing entries with matching coordinates
@@ -576,7 +575,7 @@ uint8_t makeBlockChange (short x, uint8_t y, short z, uint8_t block) {
       else {
         #ifdef ALLOW_CHESTS
         // When placing chests, just unallocate the target block and fall
-        // through to the chest-specific routine below.
+        // Through to the chest-specific routine below.
         if (block == B_chest) {
           block_changes[i].block = 0xFF;
           if (first_gap > i) first_gap = i;
@@ -601,9 +600,9 @@ uint8_t makeBlockChange (short x, uint8_t y, short z, uint8_t block) {
   #ifdef ALLOW_CHESTS
   if (block == B_chest) {
     // Chests require 15 entries total, so for maximum space-efficiency,
-    // we have to find a continuous gap that's at least 15 slots wide.
+    // We have to find a continuous gap that's at least 15 slots wide.
     // By design, this loop also continues past the current search range,
-    // which naturally appends the chest to the end if a gap isn't found.
+    // Which naturally appends the chest to the end if a gap isn't found.
     int last_real_entry = first_gap - 1;
     for (int i = first_gap; i <= block_changes_count + 15; i ++) {
       if (i >= MAX_BLOCK_CHANGES) break; // No more space, trigger failBlockChange
@@ -641,7 +640,7 @@ uint8_t makeBlockChange (short x, uint8_t y, short z, uint8_t block) {
   }
   #endif
 
-  // Handle running out of memory for new block changes
+  // Handles exhaustion of block_change capacity.
   if (first_gap == MAX_BLOCK_CHANGES) {
     failBlockChange(x, y, z, block);
     return 1;
@@ -740,7 +739,7 @@ void bumpToolDurability (PlayerData *player) {
   uint16_t held_item = player->inventory_items[player->hotbar];
 
   // In order to avoid storing durability data, items break randomly with
-  // the probability weighted based on vanilla durability.
+  // The probability weighted based on vanilla durability.
   uint32_t r = fast_rand();
   if (
     ((held_item == I_wooden_pickaxe || held_item == I_wooden_axe || held_item == I_wooden_shovel) && r < 72796055) ||
@@ -1061,7 +1060,7 @@ void handleFluidMovement (short x, uint8_t y, short z, uint8_t fluid, uint8_t bl
 
   // Get fluid level (0-7)
   // The terminology here is a bit different from vanilla:
-  // a higher fluid "level" means the fluid has traveled farther
+  // A higher fluid "level" means the fluid has traveled farther
   uint8_t level = block - fluid;
 
   // Query blocks adjacent to this fluid stream
@@ -1230,7 +1229,7 @@ void handlePlayerAction (PlayerData *player, int action, short x, short y, short
   #endif
 
   // Check if any blocks above this should break, and if so,
-  // iterate upward over all blocks in the column and break them
+  // Iterate upward over all blocks in the column and break them
   uint8_t y_offset = 1;
   while (isColumnBlock(block_above)) {
     // Destroy the next block
@@ -1290,8 +1289,8 @@ void handlePlayerUseItem (PlayerData *player, short x, short y, short z, uint8_t
       // Terrible memory hack!!
       // Copy the pointer into the player's crafting table item array.
       // This allows us to save some memory by repurposing a feature that
-      // is mutually exclusive with chests, though it is otherwise a
-      // terrible idea for obvious reasons.
+      // Is mutually exclusive with chests, though it is otherwise a
+      // Terrible idea for obvious reasons.
       memcpy(player->craft_items, &storage_ptr, sizeof(storage_ptr));
       // Flag craft_items as locked due to holding a pointer
       player->flags |= 0x80;
@@ -1299,7 +1298,7 @@ void handlePlayerUseItem (PlayerData *player, short x, short y, short z, uint8_t
       sc_openScreen(player->client_fd, 2, "Chest", 5);
       // Load the slots of the chest from the block_changes array.
       // This is a similarly dubious memcpy hack, but at least we're not
-      // mixing data types? Kind of?
+      // Mixing data types? Kind of?
       for (int i = 0; i < 27; i ++) {
         uint16_t item;
         uint8_t count;
@@ -1445,7 +1444,7 @@ void spawnMob (uint8_t type, short x, uint8_t y, short z, uint8_t health) {
 
     // Freshly spawned mobs currently don't need metadata updates.
     // If this changes, uncomment this line.
-    // broadcastMobMetadata(-1, i);
+    // BroadcastMobMetadata(-1, i);
 
     break;
   }
@@ -1639,9 +1638,9 @@ void hurtEntity (int entity_id, int attacker_id, uint8_t damage_type, uint8_t da
     // Calculate damage reduction from player's armor
     uint8_t defense = getPlayerDefensePoints(player);
     // This uses the old (pre-1.9) protection calculation. Factors are
-    // scaled up 256 times to avoid floating point math. Due to lost
-    // precision, the 4% reduction factor drops to ~3.9%, although the
-    // the resulting effective damage is then also rounded down.
+    // Scaled up 256 times to avoid floating point math. Due to lost
+    // Precision, the 4% reduction factor drops to ~3.9%, although the
+    // The resulting effective damage is then also rounded down.
     uint8_t effective_damage = damage * (256 - defense * 10) / 256;
 
     // Process health change on the server
@@ -2001,7 +2000,7 @@ void handleServerTick (int64_t time_since_last_tick) {
       )
     )) {
       // We know that movement along just one axis is fine thanks to the
-      // checks above, pick one based on proximity.
+      // Checks above, pick one based on proximity.
       int dist_x = abs(old_x - closest_player->x);
       int dist_z = abs(old_z - closest_player->z);
       if (dist_x < dist_z) new_z = old_z;
@@ -2063,7 +2062,7 @@ void handleServerTick (int64_t time_since_last_tick) {
 
 #ifdef ALLOW_CHESTS
 // Broadcasts a chest slot update to all clients who have that chest open,
-// except for the client who initiated the update.
+// Except for the client who initiated the update.
 void broadcastChestUpdate (int origin_fd, uint8_t *storage_ptr, uint16_t item, uint8_t count, uint8_t slot) {
 
   for (int i = 0; i < MAX_PLAYERS; i ++) {
