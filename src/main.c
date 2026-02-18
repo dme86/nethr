@@ -72,7 +72,14 @@ static uint8_t parseIntOverride (const char *env_name, int *out) {
 
 static uint8_t shouldLogPlayRxPacket (int packet_id) {
   // High-frequency packets that create log spam during normal play.
+  if (packet_id == 0x00) return false; // Accept teleportation
   if (packet_id == 0x0C) return false; // Client tick
+  if (packet_id == 0x19) return false; // Interact
+  if (packet_id == 0x28) return false; // Player action (dig/place related loop)
+  if (packet_id == 0x29) return false; // Player command
+  if (packet_id == 0x2A) return false; // Player input
+  if (packet_id == 0x2B) return false; // Client status
+  if (packet_id == 0x3C) return false; // Swing arm / animation intent
   if (packet_id == 0x1B) return false; // Keep-alive response
   if (packet_id == 0x1D) return false; // Set player position
   if (packet_id == 0x1E) return false; // Set player position + rotation

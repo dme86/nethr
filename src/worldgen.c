@@ -143,6 +143,21 @@ static uint8_t getLocalSlopeAt (int x, int z) {
   return (uint8_t)(h_max - h_min);
 }
 
+static uint8_t shouldPlaceRiverSurfaceWater (int x, int z, uint8_t height, uint8_t biome, float river_mask) {
+  if (biome == W_desert || biome == W_beach) return false;
+  // Keep river surface close to sea level to avoid random floating water.
+  if (height < 59 || height > 64) return false;
+  if (river_mask < 0.86f) return false;
+
+  // Require continuity: at least two direct neighbors also look like river cells.
+  int neighbors = 0;
+  if (getRiverChannelMask(x + 1, z) > 0.82f) neighbors++;
+  if (getRiverChannelMask(x - 1, z) > 0.82f) neighbors++;
+  if (getRiverChannelMask(x, z + 1) > 0.82f) neighbors++;
+  if (getRiverChannelMask(x, z - 1) > 0.82f) neighbors++;
+  return neighbors >= 2;
+}
+
 static uint32_t getCoordinateHash (int x, int y, int z) {
   uint64_t xy = ((uint64_t)(uint32_t)x << 32) | (uint32_t)y;
   uint64_t h = splitmix64(xy ^ world_seed);
@@ -637,22 +652,12 @@ uint8_t getTerrainAtFromCache (int x, int y, int z, int rx, int rz, ChunkAnchor 
       return getSurfaceBlockForBiome(anchor.biome, variant, height);
     }
     if (y == height + 1 && height >= 64) {
-      // Fill carved river channels with visible surface water.
-      if (river_mask > 0.80f && anchor.biome != W_desert && anchor.biome != W_beach && height >= 60 && height <= 82) {
+      // Fill only coherent low-altitude river beds.
+      if (shouldPlaceRiverSurfaceWater(x, z, height, anchor.biome, river_mask)) {
         return B_water;
       }
 
       if (isWaterfallSpringCandidate(x, z, height, anchor.biome)) return B_water;
-
-      // Extra waterfall candidates where strong river channels hit cliff edges.
-      if (slope == 0) slope = getLocalSlopeAt(x, z);
-      if (
-        river_mask > 0.86f &&
-        slope >= 8 &&
-        height >= 76 &&
-        anchor.biome != W_desert &&
-        anchor.biome != W_beach
-      ) return B_water;
 
       // Surface decorator pass: deterministic biome-specific patches/clusters.
       uint8_t deco = (uint8_t)((getCoordinateHash(x, 0, z) >> 9) & 255);
