@@ -124,48 +124,106 @@ uint32_t getChunkHash (short x, short z) {
 
 }
 
+typedef struct {
+  float temperature;
+  float humidity;
+  float continentalness;
+  float erosion;
+  float weirdness;
+} ClimatePoint;
+
+typedef struct {
+  uint8_t biome;
+  float temperature;
+  float humidity;
+  float continentalness;
+  float erosion;
+  float weirdness;
+} ClimateTarget;
+
+static float sampleClimateAxis (int qx, int qz, int scale_quarts, uint64_t salt) {
+  float n0 = valueNoise2D(qx, qz, scale_quarts, salt ^ 0x9E3779B97F4A7C15ULL);
+  float n1 = valueNoise2D(qx, qz, scale_quarts / 2, salt ^ 0xD1B54A32D192ED03ULL);
+  float n2 = valueNoise2D(qx, qz, scale_quarts / 4, salt ^ 0x94D049BB133111EBULL);
+  return (n0 * 0.62f + n1 * 0.26f + n2 * 0.12f) * 2.0f - 1.0f;
+}
+
+static ClimatePoint sampleClimatePoint (short chunk_x, short chunk_z) {
+  // Vanilla uses quart positions (4-block grid) for biome climate lookup.
+  // We sample the center of our minichunk on the same style of grid.
+  int block_x = chunk_x * CHUNK_SIZE + CHUNK_SIZE / 2;
+  int block_z = chunk_z * CHUNK_SIZE + CHUNK_SIZE / 2;
+  int qx = div_floor(block_x, 4);
+  int qz = div_floor(block_z, 4);
+
+  ClimatePoint p;
+  p.temperature = sampleClimateAxis(qx, qz, 96, 0xA7F3D95B6C1209E1ULL);
+  p.humidity = sampleClimateAxis(qx, qz, 96, 0xC6BC279692B5CC83ULL);
+  p.continentalness = sampleClimateAxis(qx, qz, 128, 0x8EBC6AF09C88C6E3ULL);
+  p.erosion = sampleClimateAxis(qx, qz, 96, 0x8AF1C94372DE10B5ULL);
+  p.weirdness = sampleClimateAxis(qx, qz, 64, 0xD7A9F13E21C4B6A5ULL);
+  return p;
+}
+
+static float climateDistanceSq (ClimatePoint p, ClimateTarget t) {
+  float dt = p.temperature - t.temperature;
+  float dh = p.humidity - t.humidity;
+  float dc = p.continentalness - t.continentalness;
+  float de = p.erosion - t.erosion;
+  float dw = p.weirdness - t.weirdness;
+  // Weighted distance: continentalness + temperature dominate coarse biome feel.
+  return dt * dt * 1.25f + dh * dh * 0.95f + dc * dc * 1.35f + de * de * 0.85f + dw * dw * 0.70f;
+}
+
 static uint8_t getBiomeFromClimateUncached (short x, short z) {
   if (isNetherZone(z * CHUNK_SIZE)) return W_desert;
   // Keep spawn approachable, but allow nearby biome diversity.
   if (abs((int)x) <= 10 && abs((int)z) <= 10) return W_plains;
 
-  // Procedural non-periodic climate fields in minichunk space.
-  // We map to [-1..1] to follow Vanilla biome parameter semantics
-  // (temperature/humidity/continentalness/weirdness).
-  float temperature = fractalNoise2D(x, z, 0xA7F3D95B6C1209E1ULL) * 2.0f - 1.0f;
-  float humidity = fractalNoise2D(x, z, 0xC6BC279692B5CC83ULL) * 2.0f - 1.0f;
-  float continental = fractalNoise2D(x, z, 0x8EBC6AF09C88C6E3ULL) * 2.0f - 1.0f;
-  float weirdness = fractalNoise2D(x, z, 0xD7A9F13E21C4B6A5ULL) * 2.0f - 1.0f;
-  float river_noise = fractalNoise2D(x, z, 0xF13A5B9C6D7E8A01ULL);
+  ClimatePoint climate = sampleClimatePoint(x, z);
 
-  // Vanilla-inspired inland bias: we only have one ocean-like biome proxy
-  // (W_beach), so we keep ocean/coast coverage narrower than full Notchian.
-  continental += 0.12f;
-  if (continental > 1.0f) continental = 1.0f;
-  if (continental < -1.0f) continental = -1.0f;
+  // Limited biome set: fold ocean/coast buckets into beach proxy.
+  if (climate.continentalness < -0.40f) return W_beach;
+  if (climate.continentalness < -0.20f && climate.erosion > -0.10f) return W_beach;
 
-  // Vanilla continentalness references:
-  // ocean < -0.19, coast roughly [-0.19 .. -0.11], inland >= -0.11.
-  // We compress ocean into narrow beach/ocean proxy bands.
-  if (continental < -0.46f) return W_beach;
-  if (continental < -0.20f) {
-    // Keep coast patchy and avoid giant continuous water rings.
-    if (((x ^ z) & 3) != 0) return W_plains;
+  static const ClimateTarget targets[] = {
+    // Target points approximate Notchian overworld buckets for supported biomes.
+    { W_snowy_plains, -0.75f, -0.10f,  0.10f,  0.15f,  0.05f },
+    { W_snowy_plains, -0.58f,  0.35f,  0.30f, -0.05f,  0.35f },
+    { W_desert,        0.80f, -0.58f,  0.22f, -0.12f,  0.05f },
+    { W_desert,        0.68f, -0.30f,  0.42f, -0.25f, -0.15f },
+    { W_mangrove_swamp,0.55f,  0.75f, -0.02f,  0.40f,  0.10f },
+    { W_mangrove_swamp,0.42f,  0.62f,  0.10f,  0.55f, -0.10f },
+    { W_plains,        0.20f,  0.10f,  0.30f,  0.10f,  0.00f },
+    { W_plains,        0.00f, -0.12f,  0.45f, -0.18f,  0.25f },
+    { W_plains,        0.35f,  0.35f,  0.12f,  0.42f, -0.20f }
+  };
+
+  float best_dist = 1e9f;
+  uint8_t best = W_plains;
+  for (size_t i = 0; i < sizeof(targets) / sizeof(targets[0]); i++) {
+    ClimateTarget t = targets[i];
+    // Avoid swamp/desert in high inland continental zones.
+    if (climate.continentalness > 0.55f && t.biome != W_plains && t.biome != W_snowy_plains) continue;
+    float d = climateDistanceSq(climate, t);
+    if (d < best_dist) {
+      best_dist = d;
+      best = t.biome;
+    }
+  }
+
+  // Narrow river/coastal ribbons (still deterministic by seed).
+  float river_noise = sampleClimateAxis(
+    div_floor(x * CHUNK_SIZE, 4),
+    div_floor(z * CHUNK_SIZE, 4),
+    48, 0xF13A5B9C6D7E8A01ULL
+  );
+  float river_band = river_noise < 0.0f ? -river_noise : river_noise;
+  if (climate.continentalness > -0.05f && climate.continentalness < 0.28f && river_band < 0.035f) {
     return W_beach;
   }
 
-  // Thin river-like strips through inland terrain.
-  if (continental > -0.08f) {
-    float river_edge = river_noise - 0.5f;
-    if (river_edge < 0.0f) river_edge = -river_edge;
-    if (river_edge < 0.018f) return W_beach;
-  }
-
-  // Climate mapping (compressed to currently implemented biome set).
-  if (temperature < -0.32f || (temperature < -0.18f && weirdness > 0.45f)) return W_snowy_plains;
-  if (temperature > 0.52f && humidity < -0.12f) return W_desert;
-  if (humidity > 0.45f && temperature > 0.10f && continental < 0.36f) return W_mangrove_swamp;
-  return W_plains;
+  return best;
 }
 
 uint8_t getChunkBiome (short x, short z) {
