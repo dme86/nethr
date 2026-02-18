@@ -23,6 +23,7 @@
     #include <winsock2.h>
     #include <ws2tcpip.h>
   #else
+    #include <sys/resource.h>
     #include <sys/stat.h>
     #include <sys/socket.h>
     #include <netinet/in.h>
@@ -86,6 +87,96 @@ static uint8_t shouldLogPlayRxPacket (int packet_id) {
   if (packet_id == 0x1F) return false; // Set player rotation
   if (packet_id == 0x20) return false; // Set movement flags
   return true;
+}
+
+static const char *biomeNameLocal (uint8_t biome) {
+  switch (biome) {
+    case W_plains: return "plains";
+    case W_mangrove_swamp: return "mangrove_swamp";
+    case W_desert: return "desert";
+    case W_snowy_plains: return "snowy_plains";
+    case W_beach: return "beach";
+    default: return "unknown";
+  }
+}
+
+static void logBiomeFrequencySample (short center_chunk_x, short center_chunk_z, int radius_chunks) {
+  int counts[5] = {0, 0, 0, 0, 0};
+  int total = 0;
+  for (int dz = -radius_chunks; dz <= radius_chunks; dz++) {
+    for (int dx = -radius_chunks; dx <= radius_chunks; dx++) {
+      uint8_t b = getChunkBiome((short)(center_chunk_x + dx), (short)(center_chunk_z + dz));
+      if (b < 5) counts[b]++;
+      total++;
+    }
+  }
+  if (total == 0) return;
+  printf(
+    "Biome frequency sample (center chunk %d,%d radius=%d => %d chunks):\n",
+    center_chunk_x, center_chunk_z, radius_chunks, total
+  );
+  for (int i = 0; i < 5; i++) {
+    double pct = (double)counts[i] * 100.0 / (double)total;
+    printf("  %-16s %5.1f%% (%d)\n", biomeNameLocal((uint8_t)i), pct, counts[i]);
+  }
+  printf("\n");
+}
+
+#define JOIN_LOAD_DELAY_US 30000000LL
+static int64_t join_load_due_us[MAX_PLAYERS];
+
+#if !defined(ESP_PLATFORM) && !defined(_WIN32)
+static void sendServerLoadMessage (int client_fd) {
+  struct rusage usage;
+  uint64_t rss_bytes = 0;
+  double loadavg_1m = 0.0;
+  char msg[160];
+
+  if (getrusage(RUSAGE_SELF, &usage) == 0) {
+    #ifdef __APPLE__
+      rss_bytes = (uint64_t)usage.ru_maxrss;
+    #else
+      rss_bytes = (uint64_t)usage.ru_maxrss * 1024ULL;
+    #endif
+  }
+
+  if (getloadavg(&loadavg_1m, 1) != 1) loadavg_1m = -1.0;
+
+  double rss_mb = (double)rss_bytes / (1024.0 * 1024.0);
+  if (loadavg_1m >= 0.0) {
+    snprintf(msg, sizeof(msg), "[Server] CPU load(1m): %.2f, RAM: %.1f MB", loadavg_1m, rss_mb);
+  } else {
+    snprintf(msg, sizeof(msg), "[Server] RAM: %.1f MB", rss_mb);
+  }
+
+  sc_systemChat(client_fd, msg, (uint16_t)strlen(msg));
+}
+#else
+static void sendServerLoadMessage (int client_fd) {
+  (void)client_fd;
+}
+#endif
+
+static void scheduleJoinLoadMessage (PlayerData *player) {
+  int idx = (int)(player - player_data);
+  if (idx < 0 || idx >= MAX_PLAYERS) return;
+  join_load_due_us[idx] = get_program_time() + JOIN_LOAD_DELAY_US;
+}
+
+static void processScheduledJoinLoadMessages () {
+  int64_t now = get_program_time();
+  for (int i = 0; i < MAX_PLAYERS; i++) {
+    int client_fd = player_data[i].client_fd;
+    if (client_fd == -1) {
+      join_load_due_us[i] = 0;
+      continue;
+    }
+    if (join_load_due_us[i] == 0 || now < join_load_due_us[i]) continue;
+    if (getClientState(client_fd) == STATE_PLAY) {
+      sendServerLoadMessage(client_fd);
+    }
+    join_load_due_us[i] = 0;
+  }
 }
 
 #if !defined(ESP_PLATFORM) && !defined(_WIN32)
@@ -252,6 +343,7 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
         if (getPlayerData(client_fd, &player)) break;
 
         spawnPlayer(player);
+        scheduleJoinLoadMessage(player);
 
         // Register already connected players for this client.
         FOR_EACH_VISIBLE_PLAYER(i) {
@@ -707,6 +799,7 @@ int main () {
   // Initialize persistence backend when enabled.
   if (initSerializer()) exit(EXIT_FAILURE);
   ensureWorldSpawn();
+  logBiomeFrequencySample(div_floor(world_spawn_x, CHUNK_SIZE), div_floor(world_spawn_z, CHUNK_SIZE), 96);
   saveWorldMeta();
 
   // Initialize client slots and state tables.
@@ -814,6 +907,7 @@ int main () {
     int64_t time_since_last_tick = get_program_time() - last_tick_time;
     if (time_since_last_tick > TIME_BETWEEN_TICKS) {
       handleServerTick(time_since_last_tick);
+      processScheduledJoinLoadMessages();
       flush_all_send_buffers();
       last_tick_time = get_program_time();
     }

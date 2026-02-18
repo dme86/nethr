@@ -175,6 +175,37 @@ static uint8_t isCaveOpenAt (int x, int y, int z, uint8_t surface_height) {
   return cave_field < threshold;
 }
 
+static uint8_t isSurfaceCaveEntranceAt (int x, int y, int z, uint8_t surface_height, uint8_t biome) {
+  if (biome == W_beach || biome == W_mangrove_swamp) return false;
+  if (surface_height < 76) return false;
+  if (y > (int)surface_height || y < (int)surface_height - 3) return false;
+
+  // Favor cave mouths on steeper/mountainous terrain.
+  uint8_t slope = getLocalSlopeAt(x, z);
+  if (slope < 4) return false;
+
+  float ridge = valueNoise2D(x, z, 42, 0x6D239C4FA17BE205ULL);
+  if (ridge < 0.68f) return false;
+
+  // Create clustered entrances instead of isolated single-block holes.
+  float mouth_mask = valueNoise2D(x + y * 2, z - y, 18, 0xA34E716BC59D208FULL);
+  if (mouth_mask < 0.80f) return false;
+
+  // Ensure near-surface opening connects to an underground cave body.
+  uint8_t connected = false;
+  for (int depth = 4; depth <= 10; depth++) {
+    int cave_y = (int)surface_height - depth;
+    if (cave_y <= 2) break;
+    if (isCaveOpenAt(x, cave_y, z, surface_height)) {
+      connected = true;
+      break;
+    }
+  }
+  if (!connected) return false;
+
+  return samplePseudo3DCaveNoise(x, y, z) < 0.34f;
+}
+
 static uint8_t getAquiferFluidAt (int x, int y, int z) {
   if (y < 8) return B_lava;
   if (y >= 64) return B_air;
@@ -183,6 +214,114 @@ static uint8_t getAquiferFluidAt (int x, int y, int z) {
   int fluid_level = 40 + (int)(aquifer * 24.0f); // 40..64
   if (y <= fluid_level) return B_water;
   return B_air;
+}
+
+static uint8_t getSurfaceLavaPoolBlock (int x, int y, int z, uint8_t height, uint8_t biome) {
+  (void)z;
+  if (biome == W_snowy_plains || biome == W_mangrove_swamp) return 0xFF;
+  if (height < 64 || height > 98) return 0xFF;
+
+  // Notchian reference: placed_feature/lake_lava_surface uses rarity_filter chance=200.
+  // Approximation here: one candidate check per chunk with 1/200 activation.
+  int chunk_x = div_floor(x, 16);
+  int chunk_z = div_floor(z, 16);
+  for (int dz = -1; dz <= 1; dz++) {
+    for (int dx = -1; dx <= 1; dx++) {
+      int cx = chunk_x + dx;
+      int cz = chunk_z + dz;
+      uint32_t h = getChunkHash((short)cx, (short)cz);
+      if (h % 200 != 0) continue;
+
+      int center_x = cx * 16 + (int)((h >> 5) & 15);
+      int center_z = cz * 16 + (int)((h >> 9) & 15);
+      int radius = 1 + (int)((h >> 13) & 2); // 1..3
+
+      int adx = x > center_x ? x - center_x : center_x - x;
+      int adz = z > center_z ? z - center_z : center_z - z;
+      int dist = adx + adz;
+      if (dist > radius) continue;
+
+      uint8_t slope = getLocalSlopeAt(center_x, center_z);
+      if (slope > 3) continue;
+
+      if (dist <= radius - 1) {
+        if (y == height || y == height - 1) return B_lava;
+      } else {
+        if (y == height || y == height - 1) return B_netherrack;
+      }
+    }
+  }
+  return 0xFF;
+}
+
+static uint8_t tryRuinedPortalBlock (int x, int y, int z, uint8_t biome, uint8_t *out_block) {
+  if (biome == W_beach || biome == W_mangrove_swamp) return false;
+
+  // Notchian reference: structure_set/ruined_portals random_spread spacing=40 separation=15.
+  int chunk_x = div_floor(x, 16);
+  int chunk_z = div_floor(z, 16);
+  int region_x = div_floor(chunk_x, 40);
+  int region_z = div_floor(chunk_z, 40);
+
+  for (int rz = -1; rz <= 1; rz++) {
+    for (int rx = -1; rx <= 1; rx++) {
+      int rgx = region_x + rx;
+      int rgz = region_z + rz;
+      uint64_t key = ((uint64_t)(uint32_t)rgx << 32) | (uint32_t)rgz;
+      uint32_t h = (uint32_t)splitmix64(key ^ world_seed ^ 34222645u);
+
+      int off_x = (int)(h % 25);               // spacing-separation = 25
+      int off_z = (int)((h >> 8) % 25);
+      int cand_chunk_x = rgx * 40 + off_x;
+      int cand_chunk_z = rgz * 40 + off_z;
+
+      int cx = cand_chunk_x * 16 + 8 + (int)((h >> 16) % 5) - 2;
+      int cz = cand_chunk_z * 16 + 8 + (int)((h >> 20) % 5) - 2;
+
+      int adx = x > cx ? x - cx : cx - x;
+      int adz = z > cz ? z - cz : cz - z;
+      if (adx > 5 || adz > 5) continue;
+
+      uint8_t base_y = getHeightAt(cx, cz) + 1;
+      if (base_y < 60 || base_y > 116) continue;
+
+      int orient = (h >> 24) & 1;
+      int lx = orient ? (z - cz) : (x - cx);
+      int lz = orient ? -(x - cx) : (z - cz);
+      int ly = y - base_y;
+
+      // Netherrack spread around the ruin base.
+      if (ly == -1 && lz >= -2 && lz <= 2 && lx >= -3 && lx <= 3) {
+        if (((h >> ((lx + 3) + ((lz + 2) * 3))) & 1) == 0) {
+          *out_block = B_netherrack;
+          return true;
+        }
+      }
+
+      // Simplified ruined frame (4x5), partially broken.
+      if (lz == 0) {
+        uint8_t frame = false;
+        if ((lx == -1 || lx == 2) && ly >= 0 && ly <= 4) frame = true;
+        if ((ly == 0 || ly == 4) && lx >= -1 && lx <= 2) frame = true;
+        if (frame) {
+          uint32_t bh = (uint32_t)splitmix64(((uint64_t)(lx + 8) << 32) ^ ((uint64_t)(ly + 16) << 8) ^ (uint64_t)(h));
+          if ((bh & 7) == 0) return false; // broken piece
+          *out_block = B_obsidian;
+          return true;
+        }
+      }
+
+      // Occasional lava spill near base.
+      if (ly == 0 && lz == 1 && lx >= -1 && lx <= 1) {
+        if (((h >> 27) & 3) == 0) {
+          *out_block = B_lava;
+          return true;
+        }
+      }
+    }
+  }
+
+  return false;
 }
 
 static uint8_t shouldPlaceRiverSurfaceWater (int x, int z, uint8_t height, uint8_t biome, float river_mask) {
@@ -302,22 +441,29 @@ static uint8_t getBiomeFromClimateUncached (short x, short z) {
   if (climate.continentalness < -0.20f && climate.erosion > -0.10f) return W_beach;
 
   static const ClimateTarget targets[] = {
-    // Target points approximate Notchian overworld buckets for supported biomes.
-    { W_snowy_plains, -0.75f, -0.10f,  0.10f,  0.15f,  0.05f },
-    { W_snowy_plains, -0.58f,  0.35f,  0.30f, -0.05f,  0.35f },
-    { W_desert,        0.80f, -0.58f,  0.22f, -0.12f,  0.05f },
-    { W_desert,        0.68f, -0.30f,  0.42f, -0.25f, -0.15f },
-    { W_mangrove_swamp,0.55f,  0.75f, -0.02f,  0.40f,  0.10f },
-    { W_mangrove_swamp,0.42f,  0.62f,  0.10f,  0.55f, -0.10f },
-    { W_plains,        0.20f,  0.10f,  0.30f,  0.10f,  0.00f },
-    { W_plains,        0.00f, -0.12f,  0.45f, -0.18f,  0.25f },
-    { W_plains,        0.35f,  0.35f,  0.12f,  0.42f, -0.20f }
+    // Notchian-inspired centers reduced to this project's supported biome set.
+    // Centers were derived from vanilla overworld biome-parameter buckets.
+    { W_snowy_plains, -0.74f, -0.08f,  0.26f, -0.30f,  0.00f },
+    { W_snowy_plains, -0.58f,  0.20f,  0.34f, -0.08f,  0.24f },
+    { W_desert,        0.82f, -0.12f,  0.22f, -0.18f,  0.00f },
+    { W_desert,        0.72f,  0.18f,  0.40f, -0.06f, -0.10f },
+    { W_mangrove_swamp,0.36f,  0.58f,  0.18f,  0.62f,  0.05f },
+    { W_mangrove_swamp,0.24f,  0.36f,  0.42f,  0.84f, -0.05f },
+    { W_plains,        0.14f,  0.06f,  0.30f,  0.05f,  0.00f },
+    { W_plains,       -0.02f, -0.12f,  0.46f, -0.14f,  0.18f },
+    { W_plains,        0.32f,  0.28f,  0.14f,  0.30f, -0.18f }
   };
 
   float best_dist = 1e9f;
   uint8_t best = W_plains;
   for (size_t i = 0; i < sizeof(targets) / sizeof(targets[0]); i++) {
     ClimateTarget t = targets[i];
+    // Keep snowy climates actually cold.
+    if (t.biome == W_snowy_plains && climate.temperature > -0.22f) continue;
+    // Keep deserts meaningfully warm.
+    if (t.biome == W_desert && climate.temperature < 0.32f) continue;
+    // Mangrove/swamp proxy should stay warm/humid/eroded lowlands.
+    if (t.biome == W_mangrove_swamp && (climate.humidity < 0.22f || climate.erosion < 0.22f)) continue;
     // Avoid swamp/desert in high inland continental zones.
     if (climate.continentalness > 0.55f && t.biome != W_plains && t.biome != W_snowy_plains) continue;
     float d = climateDistanceSq(climate, t);
@@ -336,6 +482,12 @@ static uint8_t getBiomeFromClimateUncached (short x, short z) {
   float river_band = river_noise < 0.0f ? -river_noise : river_noise;
   if (climate.continentalness > -0.05f && climate.continentalness < 0.28f && river_band < 0.035f) {
     return W_beach;
+  }
+
+  // Extra deterministic guards to avoid over-dominant plains in hot/cold climates.
+  if (best == W_plains) {
+    if (climate.temperature < -0.48f) return W_snowy_plains;
+    if (climate.temperature > 0.62f && climate.humidity < 0.10f) return W_desert;
   }
 
   return best;
@@ -406,9 +558,9 @@ uint8_t getCornerHeight (short anchor_x, short anchor_z, uint32_t hash, uint8_t 
   float mountain_t = 0.0f;
   float mountain_continent_min = (float)WORLDGEN_MOUNTAIN_CONTINENT_MIN / 100.0f * 2.0f - 1.0f;
   float mountain_erosion_max = (float)WORLDGEN_MOUNTAIN_EROSION_MAX / 100.0f * 2.0f - 1.0f;
-  if (continental > mountain_continent_min && erosion < mountain_erosion_max) {
+  if (continental > mountain_continent_min && erosion < (mountain_erosion_max + 0.12f)) {
     float c = (continental - mountain_continent_min) / (1.0f - mountain_continent_min);
-    float e = (mountain_erosion_max - erosion) / (mountain_erosion_max + 1.0f);
+    float e = ((mountain_erosion_max + 0.12f) - erosion) / ((mountain_erosion_max + 0.12f) + 1.0f);
     float r = ridge_folded;
     mountain_t = c * e * r;
     if (mountain_t > 1.0f) mountain_t = 1.0f;
@@ -475,7 +627,7 @@ uint8_t getCornerHeight (short anchor_x, short anchor_z, uint32_t hash, uint8_t 
   float chain_presence_t = (chain_presence - 0.45f) / 0.55f;
   if (chain_presence_t < 0.0f) chain_presence_t = 0.0f;
   if (chain_presence_t > 1.0f) chain_presence_t = 1.0f;
-  if (continental > 0.08f && erosion < 0.18f) {
+  if (continental > 0.06f && erosion < 0.34f) {
     float chain_gain = chain_t * chain_presence_t * (6.0f + 24.0f * ridge_folded);
     if (biome == W_snowy_plains) chain_gain *= 1.18f;
     if (biome == W_mangrove_swamp) chain_gain *= 0.50f;
@@ -491,6 +643,14 @@ uint8_t getCornerHeight (short anchor_x, short anchor_z, uint32_t hash, uint8_t 
     if (biome == W_snowy_plains) peak_gain *= 1.2f;
     if (biome == W_mangrove_swamp) peak_gain *= 0.45f;
     height_f += peak_gain;
+  }
+
+  // Notchian-like weirdness strongly influences peak/valley extremes.
+  float weird_abs = (ridge_src < 0.0f) ? -ridge_src : ridge_src;
+  if (continental > 0.18f && erosion < 0.12f && weird_abs > 0.82f) {
+    float weird_t = (weird_abs - 0.82f) / 0.18f;
+    if (weird_t > 1.0f) weird_t = 1.0f;
+    height_f += 8.0f + weird_t * 18.0f;
   }
 
   // Cliff sharpening around ridge zones for more dramatic transitions.
@@ -598,12 +758,30 @@ uint8_t getTerrainAtFromCache (int x, int y, int z, int rx, int rz, ChunkAnchor 
   float river_mask = getRiverChannelMask(x, z);
   uint8_t slope = 0;
 
+  // Structure pass first so ruined portal blocks can intentionally override
+  // base terrain/decor on the target columns.
+  uint8_t structure_block = 0xFF;
+  if (tryRuinedPortalBlock(x, y, z, anchor.biome, &structure_block)) {
+    return structure_block;
+  }
+
+  // Surface lava pools are a rare top-layer feature; apply before regular
+  // surface composition so lava/netherrack can replace dirt/grass cleanly.
+  if (y >= (int)height - 1 && y <= (int)height) {
+    uint8_t lava_pool_block = getSurfaceLavaPoolBlock(x, y, z, height, anchor.biome);
+    if (lava_pool_block != 0xFF) return lava_pool_block;
+  }
+
+  // Allow occasional mountain cave mouths that are visible from surface.
+  if (y <= (int)height && y >= (int)height - 3) {
+    if (isSurfaceCaveEntranceAt(x, y, z, height, anchor.biome)) return B_air;
+  }
+
   if (y >= 64 && y >= height && feature.y != 255) switch (anchor.biome) {
     case W_plains:
-    case W_snowy_plains:
     case W_mangrove_swamp: {
       // Biome-aware tree pass with deterministic silhouette and leaf mix.
-      if (feature.y < 64 && anchor.biome != W_snowy_plains) break;
+      if (feature.y < 64) break;
 
       // Tree feature must only affect columns near the tree center.
       // Without this guard, a selected feature can suppress normal surface
@@ -708,16 +886,8 @@ uint8_t getTerrainAtFromCache (int x, int y, int z, int rx, int rz, ChunkAnchor 
         WORLDGEN_PLAINS_FLOWER_CHANCE,
         WORLDGEN_DECOR_DENSITY_SCALE * WORLDGEN_FLOWER_DENSITY_SCALE
       );
-      uint8_t flowers_snow_chance = scaleChanceU8(
-        (uint8_t)(WORLDGEN_PLAINS_FLOWER_CHANCE / 2),
-        WORLDGEN_DECOR_DENSITY_SCALE * WORLDGEN_FLOWER_DENSITY_SCALE
-      );
       uint8_t mushrooms_plain_chance = scaleChanceU8(
         WORLDGEN_PLAINS_MUSHROOM_CHANCE,
-        WORLDGEN_MUSHROOM_DENSITY_SCALE
-      );
-      uint8_t mushrooms_snow_chance = scaleChanceU8(
-        WORLDGEN_SNOWY_MUSHROOM_CHANCE,
         WORLDGEN_MUSHROOM_DENSITY_SCALE
       );
       uint8_t mushrooms_swamp_chance = scaleChanceU8(
@@ -758,14 +928,6 @@ uint8_t getTerrainAtFromCache (int x, int y, int z, int rx, int rz, ChunkAnchor 
         }
       } else if (anchor.biome == W_desert) {
         if (deco < scaleChanceU8(WORLDGEN_DESERT_DEAD_BUSH_CHANCE, WORLDGEN_DECOR_DENSITY_SCALE)) return B_dead_bush;
-      } else if (anchor.biome == W_snowy_plains) {
-        if (deco < mushrooms_snow_chance) {
-          return ((getCoordinateHash(x, 6, z) & 1) == 0) ? B_brown_mushroom : B_red_mushroom;
-        }
-        if (deco < flowers_snow_chance) {
-          return getFlowerBlockFromHash(getCoordinateHash(x, 7, z), W_snowy_plains);
-        }
-        if (deco < scaleChanceU8(WORLDGEN_SNOWY_GRASS_CHANCE, WORLDGEN_DECOR_DENSITY_SCALE)) return B_short_grass;
       } else if (anchor.biome == W_mangrove_swamp) {
         if (deco < mushrooms_swamp_chance && y > 64) {
           return ((getCoordinateHash(x, 8, z) & 1) == 0) ? B_brown_mushroom : B_red_mushroom;
@@ -892,9 +1054,6 @@ ChunkFeature getFeatureFromAnchor (ChunkAnchor anchor) {
     if (anchor.biome == W_plains) {
       tree_chance = scaleChanceU8(WORLDGEN_PLAINS_TREE_BASE_CHANCE, WORLDGEN_TREE_DENSITY_SCALE)
         + (int)(grove * scaleChanceU8(WORLDGEN_PLAINS_TREE_PATCH_BONUS, WORLDGEN_TREE_DENSITY_SCALE));
-    } else if (anchor.biome == W_snowy_plains) {
-      tree_chance = scaleChanceU8(WORLDGEN_SNOWY_TREE_BASE_CHANCE, WORLDGEN_TREE_DENSITY_SCALE)
-        + (int)(grove * scaleChanceU8((uint8_t)(WORLDGEN_PLAINS_TREE_PATCH_BONUS / 2), WORLDGEN_TREE_DENSITY_SCALE));
     } else if (anchor.biome == W_mangrove_swamp) {
       tree_chance = scaleChanceU8(WORLDGEN_SWAMP_TREE_BASE_CHANCE, WORLDGEN_TREE_DENSITY_SCALE)
         + (int)(grove * scaleChanceU8(WORLDGEN_SWAMP_TREE_PATCH_BONUS, WORLDGEN_TREE_DENSITY_SCALE));
@@ -914,7 +1073,6 @@ ChunkFeature getFeatureFromAnchor (ChunkAnchor anchor) {
     // bits 0..1 type, bit 2 tall, bit 3 top crown.
     uint8_t shape_bits = (uint8_t)((anchor.hash >> ((feature.x + feature.z) & 15)) & 0x0F);
     if (anchor.biome == W_mangrove_swamp) shape_bits = (shape_bits & 0x0C) | 2;
-    if (anchor.biome == W_snowy_plains) shape_bits = (shape_bits & 0x0C) | 1;
     feature.variant = shape_bits;
   }
 
