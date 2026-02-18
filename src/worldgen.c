@@ -369,6 +369,13 @@ uint8_t getTerrainAtFromCache (int x, int y, int z, int rx, int rz, ChunkAnchor 
       // Biome-aware tree pass with deterministic silhouette and leaf mix.
       if (feature.y < 64 && anchor.biome != W_snowy_plains) break;
 
+      // Tree feature must only affect columns near the tree center.
+      // Without this guard, a selected feature can suppress normal surface
+      // decoration across the whole minichunk and create visual artifacts.
+      uint8_t dx = x > feature.x ? x - feature.x : feature.x - x;
+      uint8_t dz = z > feature.z ? z - feature.z : feature.z - z;
+      if (dx > 2 || dz > 2) break;
+
       if (anchor.biome == W_mangrove_swamp) {
         if (x == feature.x && z == feature.z && y == 64 && height < 63) return B_lily_pad;
         if (y == height + 1) {
@@ -398,9 +405,6 @@ uint8_t getTerrainAtFromCache (int x, int y, int z, int rx, int rz, ChunkAnchor 
         if (y == feature.y - 1) return base_block;
         if (y >= feature.y && y < feature.y + trunk_h) return B_oak_log;
       }
-
-      uint8_t dx = x > feature.x ? x - feature.x : feature.x - x;
-      uint8_t dz = z > feature.z ? z - feature.z : feature.z - z;
       int rel = y - ((int)feature.y + (int)trunk_h - 3);
 
       if (rel == 0 || rel == 1) {
