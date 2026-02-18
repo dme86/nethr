@@ -14,6 +14,25 @@ static uint8_t isNetherZone (int z) {
   return z >= NETHER_ZONE_OFFSET;
 }
 
+#define BIOME_CACHE_CAPACITY 4096
+
+typedef struct {
+  short x;
+  short z;
+  uint8_t biome;
+  uint8_t used;
+} BiomeCacheEntry;
+
+static BiomeCacheEntry biome_cache[BIOME_CACHE_CAPACITY];
+
+static uint32_t hashChunkXZ (short x, short z) {
+  uint32_t ux = (uint16_t)x;
+  uint32_t uz = (uint16_t)z;
+  return (ux * 73856093u) ^ (uz * 19349663u);
+}
+
+static uint8_t getBiomeFromClimateUncached (short x, short z);
+
 static float lerp01 (float a, float b, float t) {
   return a + (b - a) * t;
 }
@@ -71,24 +90,58 @@ uint32_t getChunkHash (short x, short z) {
 
 }
 
-uint8_t getChunkBiome (short x, short z) {
-
+static uint8_t getBiomeFromClimateUncached (short x, short z) {
   if (isNetherZone(z * CHUNK_SIZE)) return W_desert;
-  // Keep the join area consistently friendly and traversable.
-  if (abs((int)x) <= 24 && abs((int)z) <= 24) return W_plains;
+  // Keep spawn approachable, but allow nearby biome diversity.
+  if (abs((int)x) <= 10 && abs((int)z) <= 10) return W_plains;
 
-  // Procedural, non-periodic biome fields in minichunk space.
+  // Procedural non-periodic climate fields in minichunk space.
+  // We intentionally use few octaves to keep CPU predictable on low-end hosts.
   float temperature = fractalNoise2D(x, z, 0xA7F3D95B6C1209E1ULL);
   float humidity = fractalNoise2D(x, z, 0xC6BC279692B5CC83ULL);
   float continental = fractalNoise2D(x, z, 0x8EBC6AF09C88C6E3ULL);
+  float weirdness = fractalNoise2D(x, z, 0xD7A9F13E21C4B6A5ULL);
+  float river_noise = fractalNoise2D(x, z, 0xF13A5B9C6D7E8A01ULL);
 
-  // Coastline band around low continentalness.
-  if (continental < 0.30f) return W_beach;
+  // Coastline around low-continental regions.
+  if (continental < 0.26f) return W_beach;
+  // Thin river-like strips through inland terrain (cheap heuristic).
+  if (continental > 0.32f) {
+    float river_edge = river_noise - 0.5f;
+    if (river_edge < 0.0f) river_edge = -river_edge;
+    if (river_edge < 0.035f) return W_beach;
+  }
 
-  if (temperature < 0.28f) return W_snowy_plains;
-  if (temperature > 0.68f && humidity < 0.42f) return W_desert;
-  if (humidity > 0.70f && temperature > 0.45f) return W_mangrove_swamp;
+  // Climate mapping (compressed to currently implemented biome set).
+  if (temperature < 0.24f || (temperature < 0.30f && weirdness > 0.62f)) return W_snowy_plains;
+  if (temperature > 0.70f && humidity < 0.46f) return W_desert;
+  if (humidity > 0.72f && temperature > 0.44f && continental < 0.62f) return W_mangrove_swamp;
   return W_plains;
+}
+
+uint8_t getChunkBiome (short x, short z) {
+
+  // Biome lookup is hot-path for chunk generation; keep a tiny fixed cache.
+  uint32_t h = hashChunkXZ(x, z);
+  int first_free = -1;
+  for (int i = 0; i < BIOME_CACHE_CAPACITY; i ++) {
+    int slot = (int)((h + (uint32_t)i) % BIOME_CACHE_CAPACITY);
+    BiomeCacheEntry *entry = &biome_cache[slot];
+    if (!entry->used) {
+      if (first_free == -1) first_free = slot;
+      break;
+    }
+    if (entry->x == x && entry->z == z) return entry->biome;
+  }
+
+  uint8_t biome = getBiomeFromClimateUncached(x, z);
+  int slot = first_free;
+  if (slot == -1) slot = (int)(h % BIOME_CACHE_CAPACITY);
+  biome_cache[slot].used = true;
+  biome_cache[slot].x = x;
+  biome_cache[slot].z = z;
+  biome_cache[slot].biome = biome;
+  return biome;
 
 }
 
@@ -123,6 +176,9 @@ uint8_t getCornerHeight (uint32_t hash, uint8_t biome) {
         (hash >> 8 & 3) +
         (hash >> 12 & 3)
       );
+      // Macro undulation lowers abrupt cliff patterns between neighboring chunks.
+      int8_t macro = (int8_t)((hash >> 16) & 7) - 3;
+      height += macro;
       // Add extra "micro-biome" variation without changing protocol biomes.
       if (variant == 0) height += 4;         // Plateaus
       else if (variant == 1 && height > 6) height -= 6; // Valleys
