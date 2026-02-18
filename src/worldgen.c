@@ -74,13 +74,13 @@ static float fractalNoise2D (int x, int z, uint64_t salt) {
 }
 
 static uint8_t getSurfaceBlockForBiome (uint8_t biome, uint8_t variant, uint8_t height) {
+  (void)variant;
   if (height < 63) return B_water;
   if (biome == W_mangrove_swamp) return B_mud;
   if (biome == W_snowy_plains) return B_snowy_grass_block;
   if (biome == W_desert) return B_sand;
   if (biome == W_beach) return B_sand;
-  // Keep plains mostly grassy/playable; retain some dirt patches for variation.
-  if (biome == W_plains && variant == 1) return B_dirt;
+  // Plains top layer stays grass; dirt appears below surface.
   return B_grass_block;
 }
 
