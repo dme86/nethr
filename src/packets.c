@@ -55,6 +55,7 @@ static void writeOverworldContext (int client_fd) {
 static uint8_t sky_light_full[2048];
 static uint8_t sky_light_dark[2048];
 static uint8_t sky_light_buffers_initialized = false;
+static int8_t template_chunks_enabled_cached = -1;
 
 static void initSkyLightBuffers () {
   if (sky_light_buffers_initialized) return;
@@ -63,6 +64,17 @@ static void initSkyLightBuffers () {
     sky_light_dark[i] = 0x00;
   }
   sky_light_buffers_initialized = true;
+}
+
+static uint8_t templateChunksEnabled () {
+  if (template_chunks_enabled_cached != -1) return (uint8_t)template_chunks_enabled_cached;
+  const char *env = getenv("NETHR_DISABLE_TEMPLATE_CHUNKS");
+  if (env != NULL && env[0] == '1') template_chunks_enabled_cached = false;
+  else template_chunks_enabled_cached = true;
+  if (!template_chunks_enabled_cached) {
+    printf("Template chunks disabled by env NETHR_DISABLE_TEMPLATE_CHUNKS=1; using procedural encoder\n\n");
+  }
+  return (uint8_t)template_chunks_enabled_cached;
 }
 
 #define CHUNK_TEMPLATE_POOL_MAX 64
@@ -339,6 +351,7 @@ static int selectTemplateByNeighbors (int32_t world_x, int32_t world_z) {
 }
 
 static void tryLoadChunkTemplate0x2cPool () {
+  if (!templateChunksEnabled()) return;
   if (chunk_template_0x2c_pool_loaded) return;
   chunk_template_0x2c_pool_loaded = true;
 
