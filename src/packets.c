@@ -1713,7 +1713,7 @@ int sc_spawnEntity (
   uint8_t yaw, uint8_t pitch
 ) {
 
-  writeVarInt(client_fd, 51 + sizeVarInt(id) + sizeVarInt(type));
+  writeVarInt(client_fd, 46 + sizeVarInt(id) + sizeVarInt(type));
   writeByte(client_fd, 0x01);
 
   writeVarInt(client_fd, id); // Entity ID
@@ -1728,10 +1728,9 @@ int sc_spawnEntity (
   // 1.21.11 layout matches Notchian order:
   // position -> velocity -> rotations -> data (VarInt).
   // Previous order caused decoder "bytes extra" on add_entity.
-  // Velocity (delta movement)
-  writeUint16(client_fd, 0);
-  writeUint16(client_fd, 0);
-  writeUint16(client_fd, 0);
+  // Velocity (delta movement), 1.21.11 compressed Vec3 format.
+  // Zero velocity is encoded as a single zero byte (not 3 shorts).
+  writeByte(client_fd, 0x00);
 
   // Angles
   writeByte(client_fd, pitch);
@@ -1815,6 +1814,43 @@ int sc_teleportEntity (
   writeFloat(client_fd, pitch);
   // On ground flag
   writeByte(client_fd, 1);
+
+  return 0;
+}
+
+// S->C Move Entity Position+Rotation (relative)
+int sc_moveEntityPosRot (
+  int client_fd, int id,
+  double old_x, double old_y, double old_z,
+  double new_x, double new_y, double new_z,
+  uint8_t yaw, uint8_t pitch
+) {
+  // 1.21.11: play/clientbound move_entity_pos_rot
+  // Deltas are fixed-point position differences in 1/4096 blocks.
+  double dxf = (new_x - old_x) * 4096.0;
+  double dyf = (new_y - old_y) * 4096.0;
+  double dzf = (new_z - old_z) * 4096.0;
+  int32_t dx = (int32_t)(dxf >= 0 ? dxf + 0.5 : dxf - 0.5);
+  int32_t dy = (int32_t)(dyf >= 0 ? dyf + 0.5 : dyf - 0.5);
+  int32_t dz = (int32_t)(dzf >= 0 ? dzf + 0.5 : dzf - 0.5);
+
+  if (dx < -32768) dx = -32768;
+  if (dx >  32767) dx =  32767;
+  if (dy < -32768) dy = -32768;
+  if (dy >  32767) dy =  32767;
+  if (dz < -32768) dz = -32768;
+  if (dz >  32767) dz =  32767;
+
+  writeByte(client_fd, 10 + sizeVarInt(id));
+  writeByte(client_fd, 0x34);
+
+  writeVarInt(client_fd, id);
+  writeUint16(client_fd, (uint16_t)dx);
+  writeUint16(client_fd, (uint16_t)dy);
+  writeUint16(client_fd, (uint16_t)dz);
+  writeByte(client_fd, yaw);
+  writeByte(client_fd, pitch);
+  writeByte(client_fd, 1); // on_ground
 
   return 0;
 }
@@ -2096,6 +2132,32 @@ int sc_entityEvent (int client_fd, int entity_id, uint8_t status) {
 
   writeUint32(client_fd, entity_id);
   writeByte(client_fd, status);
+
+  return 0;
+}
+
+// S->C Sound Entity
+int sc_soundEntity (int client_fd, int sound_id, int source, int entity_id, float volume, float pitch, uint64_t seed) {
+  int payload_len =
+    sizeVarInt(0x72) +
+    sizeVarInt(sound_id) +
+    sizeVarInt(source) +
+    sizeVarInt(entity_id) +
+    4 + 4 + 8;
+
+  writeVarInt(client_fd, payload_len);
+  // 1.21.11: play/clientbound sound_entity
+  writeByte(client_fd, 0x72);
+
+  // Holder<SoundEvent> uses the synchronized sound_event registry ID.
+  writeVarInt(client_fd, sound_id);
+  // SoundSource enum id
+  writeVarInt(client_fd, source);
+  // Target entity id
+  writeVarInt(client_fd, entity_id);
+  writeFloat(client_fd, volume);
+  writeFloat(client_fd, pitch);
+  writeUint64(client_fd, seed);
 
   return 0;
 }

@@ -47,8 +47,15 @@
 // This avoids full multi-dimension state while still allowing nether gameplay.
 #define NETHER_ZONE_OFFSET 16384
 
-// Protocol entity type ID for villagers in 1.21.x registries.
-#define ENTITY_TYPE_VILLAGER 155
+// Protocol entity type IDs from 1.21.11 minecraft:entity_type registry.
+// Keep these centralized to avoid client-side model mismatches when Mojang
+// shifts registry ordering between protocol versions.
+#define ENTITY_TYPE_CHICKEN 26
+#define ENTITY_TYPE_COW 30
+#define ENTITY_TYPE_PIG 100
+#define ENTITY_TYPE_SHEEP 111
+#define ENTITY_TYPE_VILLAGER 139
+#define ENTITY_TYPE_ZOMBIE 150
 
 // Calculated from TIME_BETWEEN_TICKS
 #define TICKS_PER_SECOND ((float)1000000 / TIME_BETWEEN_TICKS)

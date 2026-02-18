@@ -579,7 +579,7 @@ void broadcastMobMetadata (int client_fd, int entity_id) {
   size_t length;
 
   switch (mob->type) {
-    case 106: // Sheep
+    case ENTITY_TYPE_SHEEP: // Sheep
       if (!((mob->data >> 5) & 1)) // Don't send metadata if sheep isn't sheared
         return;
 
@@ -1601,7 +1601,7 @@ void interactEntity (int entity_id, int interactor_id) {
   MobData *mob = &mob_data[mob_index];
 
   switch (mob->type) {
-    case 106: // Sheep
+    case ENTITY_TYPE_SHEEP: // Sheep
       if (player->inventory_items[player->hotbar] != I_shears)
         return;
 
@@ -1730,6 +1730,11 @@ void hurtEntity (int entity_id, int attacker_id, uint8_t damage_type, uint8_t da
 
   // Whether this attack caused the target entity to die
   uint8_t entity_died = false;
+  // Whether to emit a mob hurt entity_event for this hit.
+  uint8_t mob_hurt_event = false;
+  int mob_sound_hurt = -1;
+  int mob_sound_death = -1;
+  int mob_sound_source = 6; // neutral
 
   if (entity_id > 0) { // The attacked entity is a player
 
@@ -1808,6 +1813,37 @@ void hurtEntity (int entity_id, int attacker_id, uint8_t damage_type, uint8_t da
 
     // Set the mob's panic timer
     mob->data |= (3 << 6);
+    // Emit hurt event for every valid mob hit; this drives hurt animation/sound.
+    mob_hurt_event = true;
+    switch (mob->type) {
+      case ENTITY_TYPE_CHICKEN:
+        mob_sound_hurt = 333;
+        mob_sound_death = 331;
+        mob_sound_source = 6;
+        break;
+      case ENTITY_TYPE_COW:
+        mob_sound_hurt = 424;
+        mob_sound_death = 423;
+        mob_sound_source = 6;
+        break;
+      case ENTITY_TYPE_PIG:
+        mob_sound_hurt = 1216;
+        mob_sound_death = 1215;
+        mob_sound_source = 6;
+        break;
+      case ENTITY_TYPE_SHEEP:
+        mob_sound_hurt = 1379;
+        mob_sound_death = 1378;
+        mob_sound_source = 6;
+        break;
+      case ENTITY_TYPE_ZOMBIE:
+        mob_sound_hurt = 1807;
+        mob_sound_death = 1800;
+        mob_sound_source = 5; // hostile
+        break;
+      default:
+        break;
+    }
 
     // Process health change on the server
     if (mob_health <= damage) {
@@ -1821,11 +1857,25 @@ void hurtEntity (int entity_id, int attacker_id, uint8_t damage_type, uint8_t da
         PlayerData *player;
         if (getPlayerData(attacker_id, &player)) return;
         switch (mob->type) {
-          case 25: givePlayerItem(player, I_chicken, 1); break;
-          case 28: givePlayerItem(player, I_beef, 1 + (fast_rand() % 3)); break;
-          case 95: givePlayerItem(player, I_porkchop, 1 + (fast_rand() % 3)); break;
-          case 106: givePlayerItem(player, I_mutton, 1 + (fast_rand() & 1)); break;
-          case 145: givePlayerItem(player, I_rotten_flesh, (fast_rand() % 3)); break;
+          case ENTITY_TYPE_CHICKEN:
+            givePlayerItem(player, I_chicken, 1);
+            if ((fast_rand() & 1) == 0) givePlayerItem(player, I_feather, 1 + (fast_rand() & 1));
+            break;
+          case ENTITY_TYPE_COW:
+            givePlayerItem(player, I_beef, 1 + (fast_rand() % 3));
+            if ((fast_rand() & 1) == 0) givePlayerItem(player, I_leather, 1 + (fast_rand() & 1));
+            break;
+          case ENTITY_TYPE_PIG:
+            givePlayerItem(player, I_porkchop, 1 + (fast_rand() % 3));
+            break;
+          case ENTITY_TYPE_SHEEP:
+            givePlayerItem(player, I_mutton, 1 + (fast_rand() & 1));
+            // Unsheared sheep drop one wool on death.
+            if (((mob->data >> 5) & 1) == 0) givePlayerItem(player, I_white_wool, 1);
+            break;
+          case ENTITY_TYPE_ZOMBIE:
+            if ((fast_rand() & 1) == 0) givePlayerItem(player, I_rotten_flesh, 1 + (fast_rand() & 1));
+            break;
           default: break;
         }
       }
@@ -1838,10 +1888,19 @@ void hurtEntity (int entity_id, int attacker_id, uint8_t damage_type, uint8_t da
   for (int i = 0; i < MAX_PLAYERS; i ++) {
     int client_fd = player_data[i].client_fd;
     if (client_fd == -1) continue;
+    if (mob_hurt_event) {
+      sc_entityEvent(client_fd, entity_id, 2);
+      if (!entity_died && mob_sound_hurt != -1) {
+        sc_soundEntity(client_fd, mob_sound_hurt, mob_sound_source, entity_id, 1.0f, 1.0f, fast_rand());
+      }
+    }
     sc_damageEvent(client_fd, entity_id, damage_type);
     // Below this, handle death events
     if (!entity_died) continue;
     sc_entityEvent(client_fd, entity_id, 3);
+    if (entity_id < 0 && mob_sound_death != -1) {
+      sc_soundEntity(client_fd, mob_sound_death, mob_sound_source, entity_id, 1.0f, 1.0f, fast_rand());
+    }
     if (entity_id >= 0) {
       // If a player died, broadcast their death message
       sc_systemChat(client_fd, (char *)recv_buffer, strlen((char *)recv_buffer));
@@ -1969,10 +2028,10 @@ void handleServerTick (int64_t time_since_last_tick) {
     }
 
     uint8_t passive = (
-      mob_data[i].type == 25 || // Chicken
-      mob_data[i].type == 28 || // Cow
-      mob_data[i].type == 95 || // Pig
-      mob_data[i].type == 106 || // Sheep
+      mob_data[i].type == ENTITY_TYPE_CHICKEN || // Chicken
+      mob_data[i].type == ENTITY_TYPE_COW || // Cow
+      mob_data[i].type == ENTITY_TYPE_PIG || // Pig
+      mob_data[i].type == ENTITY_TYPE_SHEEP || // Sheep
       mob_data[i].type == ENTITY_TYPE_VILLAGER // Villager
     );
     // Mob "panic" timer, set to 3 after being hit
@@ -2161,10 +2220,11 @@ void handleServerTick (int64_t time_since_last_tick) {
     // Broadcast relevant entity movement packets
     for (int j = 0; j < MAX_PLAYERS; j ++) {
       if (player_data[j].client_fd == -1) continue;
-      sc_teleportEntity (
+      sc_moveEntityPosRot (
         player_data[j].client_fd, entity_id,
-        (double)new_x + 0.5, new_y, (double)new_z + 0.5,
-        yaw * 360 / 256, 0
+        (double)old_x + 0.5, (double)old_y, (double)old_z + 0.5,
+        (double)new_x + 0.5, (double)new_y, (double)new_z + 0.5,
+        yaw, 0
       );
       sc_setHeadRotation(player_data[j].client_fd, entity_id, yaw);
     }

@@ -55,6 +55,12 @@ int sc_spawnEntityPlayer (int client_fd, PlayerData player);
 int sc_setEntityMetadata (int client_fd, int id, EntityData *metadata, size_t length);
 int sc_entityAnimation (int client_fd, int id, uint8_t animation);
 int sc_teleportEntity (int client_fd, int id, double x, double y, double z, float yaw, float pitch);
+int sc_moveEntityPosRot (
+  int client_fd, int id,
+  double old_x, double old_y, double old_z,
+  double new_x, double new_y, double new_z,
+  uint8_t yaw, uint8_t pitch
+);
 int sc_setHeadRotation (int client_fd, int id, uint8_t yaw);
 int sc_updateEntityRotation (int client_fd, int id, uint8_t yaw, uint8_t pitch);
 int sc_damageEvent (int client_fd, int id, int type);
@@ -62,6 +68,7 @@ int sc_setHealth (int client_fd, uint8_t health, uint8_t food, uint16_t saturati
 int sc_respawn (int client_fd);
 int sc_systemChat (int client_fd, char* message, uint16_t len);
 int sc_entityEvent (int client_fd, int entity_id, uint8_t status);
+int sc_soundEntity (int client_fd, int sound_id, int source, int entity_id, float volume, float pitch, uint64_t seed);
 int sc_removeEntity (int client_fd, int entity_id);
 int sc_pickupItem (int client_fd, int collected, int collector, uint8_t count);
 int sc_registries (int client_fd);

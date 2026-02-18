@@ -358,7 +358,15 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
             if (packet_id == 0x1F) {
               sc_updateEntityRotation(player_data[i].client_fd, client_fd, player->yaw, player->pitch);
             } else {
-              sc_teleportEntity(player_data[i].client_fd, client_fd, x, y, z, yaw, pitch);
+              double old_x = (double)player->x + (player->x >= 0 ? 0.5 : -0.5);
+              double old_z = (double)player->z + (player->z >= 0 ? 0.5 : -0.5);
+              double old_y = (double)player->y;
+              sc_moveEntityPosRot(
+                player_data[i].client_fd, client_fd,
+                old_x, old_y, old_z,
+                x, y, z,
+                player->yaw, player->pitch
+              );
             }
             sc_setHeadRotation(player_data[i].client_fd, client_fd, player->yaw);
           }
@@ -452,21 +460,21 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
               if ((world_time < 13000 || world_time > 23460) && mob_y > 48) {
                 if (in_nether_zone) {
                   // Keep nether-zone population sparse.
-                  if ((r >> 12) & 1) spawnMob(145, mob_x, mob_y, mob_z, 20); // Zombie stand-in
+                  if ((r >> 12) & 1) spawnMob(ENTITY_TYPE_ZOMBIE, mob_x, mob_y, mob_z, 20); // Zombie stand-in
                 } else {
                   uint32_t mob_choice = (r >> 12) % 5;
-                  if (mob_choice == 0) spawnMob(25, mob_x, mob_y, mob_z, 4); // Chicken
-                  else if (mob_choice == 1) spawnMob(28, mob_x, mob_y, mob_z, 10); // Cow
-                  else if (mob_choice == 2) spawnMob(95, mob_x, mob_y, mob_z, 10); // Pig
-                  else if (mob_choice == 3) spawnMob(106, mob_x, mob_y, mob_z, 8); // Sheep
+                  if (mob_choice == 0) spawnMob(ENTITY_TYPE_CHICKEN, mob_x, mob_y, mob_z, 4); // Chicken
+                  else if (mob_choice == 1) spawnMob(ENTITY_TYPE_COW, mob_x, mob_y, mob_z, 10); // Cow
+                  else if (mob_choice == 2) spawnMob(ENTITY_TYPE_PIG, mob_x, mob_y, mob_z, 10); // Pig
+                  else if (mob_choice == 3) spawnMob(ENTITY_TYPE_SHEEP, mob_x, mob_y, mob_z, 8); // Sheep
                   else if (getMobCountByType(ENTITY_TYPE_VILLAGER) < MAX_VILLAGERS) {
                     spawnMob(ENTITY_TYPE_VILLAGER, mob_x, mob_y, mob_z, 20); // Villager
                   } else {
-                    spawnMob(28, mob_x, mob_y, mob_z, 10); // Cow fallback
+                    spawnMob(ENTITY_TYPE_COW, mob_x, mob_y, mob_z, 10); // Cow fallback
                   }
                 }
               } else if (!in_nether_zone || ((r >> 13) & 1)) {
-                spawnMob(145, mob_x, mob_y, mob_z, 20); // Zombie
+                spawnMob(ENTITY_TYPE_ZOMBIE, mob_x, mob_y, mob_z, 20); // Zombie
               }
             }
           }
