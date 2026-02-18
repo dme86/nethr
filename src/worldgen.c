@@ -73,6 +73,17 @@ static float fractalNoise2D (int x, int z, uint64_t salt) {
   return n0 * 0.60f + n1 * 0.28f + n2 * 0.12f;
 }
 
+static uint8_t getSurfaceBlockForBiome (uint8_t biome, uint8_t variant, uint8_t height) {
+  if (height < 63) return B_water;
+  if (biome == W_mangrove_swamp) return B_mud;
+  if (biome == W_snowy_plains) return B_snowy_grass_block;
+  if (biome == W_desert) return B_sand;
+  if (biome == W_beach) return B_sand;
+  if (biome == W_plains && variant == 0) return B_stone;
+  if (biome == W_plains && variant == 1) return B_dirt;
+  return B_grass_block;
+}
+
 static uint32_t getCoordinateHash (int x, int y, int z) {
   uint64_t xy = ((uint64_t)(uint32_t)x << 32) | (uint32_t)y;
   uint64_t h = splitmix64(xy ^ world_seed);
@@ -305,7 +316,7 @@ uint8_t getTerrainAtFromCache (int x, int y, int z, int rx, int rz, ChunkAnchor 
   uint8_t variant = (anchor.hash >> 20) & 3;
 
   if (y >= 64 && y >= height && feature.y != 255) switch (anchor.biome) {
-    case W_plains: { // Generate trees in the plains biome
+    case W_plains: { // Generate trees in plains groves
 
       // Don't generate trees underwater
       if (feature.y < 64) break;
@@ -392,20 +403,38 @@ uint8_t getTerrainAtFromCache (int x, int y, int z, int rx, int rz, ChunkAnchor 
       return B_grass_block;
     }
     if (y == height + 1 && height >= 64) {
-      // Surface decorator pass: add more life to the terrain without changing
-      // the base biome mapping. Deterministic per (x,z,seed).
+      // Surface decorator pass: deterministic biome-specific patches/clusters.
       uint8_t deco = (uint8_t)((getCoordinateHash(x, 0, z) >> 9) & 255);
+      uint8_t surface = getSurfaceBlockForBiome(anchor.biome, variant, height);
       if (anchor.biome == W_plains) {
-        if (deco < WORLDGEN_PLAINS_PUMPKIN_CHANCE) return B_pumpkin;
-        deco -= WORLDGEN_PLAINS_PUMPKIN_CHANCE;
-        if (deco < WORLDGEN_PLAINS_FLOWER_CHANCE) {
-          uint8_t flower = (uint8_t)((getCoordinateHash(x, 1, z) >> 5) & 3);
-          if (flower == 0) return B_dandelion;
-          if (flower == 1) return B_poppy;
-          return B_cornflower;
+        if (surface == B_grass_block) {
+          // Vanilla-like pumpkin patches: rare, local clusters, not isolated noise.
+          float pumpkin_patch = valueNoise2D(
+            x, z, WORLDGEN_PUMPKIN_PATCH_SCALE, 0x36C492A5E17B4D09ULL
+          );
+          if (
+            pumpkin_patch > ((float)WORLDGEN_PUMPKIN_PATCH_THRESHOLD / 100.0f) &&
+            deco < WORLDGEN_PLAINS_PUMPKIN_CHANCE
+          ) {
+            return B_pumpkin;
+          }
+
+          // Flowers spawn in patch regions, with local per-column randomness.
+          float flower_patch = valueNoise2D(
+            x, z, WORLDGEN_FLOWER_PATCH_SCALE, 0x91BD3EF0762CA845ULL
+          );
+          if (
+            flower_patch > ((float)WORLDGEN_FLOWER_PATCH_THRESHOLD / 100.0f) &&
+            deco < WORLDGEN_PLAINS_FLOWER_CHANCE
+          ) {
+            uint8_t flower = (uint8_t)((getCoordinateHash(x, 1, z) >> 5) & 3);
+            if (flower == 0) return B_dandelion;
+            if (flower == 1) return B_poppy;
+            return B_cornflower;
+          }
+
+          if (deco < WORLDGEN_PLAINS_GRASS_CHANCE) return B_short_grass;
         }
-        deco -= WORLDGEN_PLAINS_FLOWER_CHANCE;
-        if (deco < WORLDGEN_PLAINS_GRASS_CHANCE) return B_short_grass;
       } else if (anchor.biome == W_desert) {
         if (deco < WORLDGEN_DESERT_DEAD_BUSH_CHANCE) return B_dead_bush;
       } else if (anchor.biome == W_snowy_plains) {
@@ -486,17 +515,12 @@ ChunkFeature getFeatureFromAnchor (ChunkAnchor anchor) {
   feature.z = feature_position / CHUNK_SIZE;
   uint8_t skip_feature = false;
 
-  // The following check does two things:
-  // Firstly, it ensures that trees don't cross chunk boundaries;
-  // Secondly, it reduces overall feature count. This is favorable
-  // Everywhere except for swamps, which are otherwise very boring.
-  if (anchor.biome != W_mangrove_swamp) {
-    int margin = WORLDGEN_TREE_EDGE_MARGIN;
-    if (margin < 0) margin = 0;
-    if (margin >= CHUNK_SIZE) margin = CHUNK_SIZE - 1;
-    if (feature.x < margin || feature.x > CHUNK_SIZE - 1 - margin) skip_feature = true;
-    else if (feature.z < margin || feature.z > CHUNK_SIZE - 1 - margin) skip_feature = true;
-  }
+  // Keep tree crowns mostly within minichunk bounds.
+  int margin = WORLDGEN_TREE_EDGE_MARGIN;
+  if (margin < 0) margin = 0;
+  if (margin >= CHUNK_SIZE) margin = CHUNK_SIZE - 1;
+  if (feature.x < margin || feature.x > CHUNK_SIZE - 1 - margin) skip_feature = true;
+  else if (feature.z < margin || feature.z > CHUNK_SIZE - 1 - margin) skip_feature = true;
 
   if (skip_feature) {
     // Skipped features are indicated by a Y coordinate of 0xFF (255)
@@ -508,6 +532,39 @@ ChunkFeature getFeatureFromAnchor (ChunkAnchor anchor) {
       mod_abs(feature.x, CHUNK_SIZE), mod_abs(feature.z, CHUNK_SIZE),
       anchor.x, anchor.z, anchor.hash, anchor.biome
     ) + 1;
+
+    // Tree placement rules: only in specific biomes, on proper top blocks,
+    // and clustered into groves via low-frequency patch noise.
+    uint8_t top = getSurfaceBlockForBiome(anchor.biome, (anchor.hash >> 20) & 3, (uint8_t)(feature.y - 1));
+    if (top != B_grass_block) {
+      feature.y = 0xFF;
+      return feature;
+    }
+
+    int tree_chance = 0;
+    if (anchor.biome == W_plains) {
+      float tree_patch = valueNoise2D(
+        anchor.x, anchor.z, WORLDGEN_TREE_PATCH_SCALE, 0xAF43D2895B1EC704ULL
+      );
+      // Patch curve: low outside groves, high in grove centers.
+      float grove = tree_patch - 0.45f;
+      if (grove < 0.0f) grove = 0.0f;
+      grove *= 2.0f;
+      if (grove > 1.0f) grove = 1.0f;
+      grove *= grove;
+      tree_chance = WORLDGEN_PLAINS_TREE_BASE_CHANCE + (int)(grove * WORLDGEN_PLAINS_TREE_PATCH_BONUS);
+    } else {
+      feature.y = 0xFF;
+      return feature;
+    }
+
+    uint8_t roll = (uint8_t)((anchor.hash >> 24) & 255);
+    if (roll >= (uint8_t)tree_chance) {
+      feature.y = 0xFF;
+      return feature;
+    }
+
+    // Tree variant controls trunk height jitter.
     feature.variant = (anchor.hash >> (feature.x + feature.z)) & 1;
   }
 

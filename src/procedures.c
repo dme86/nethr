@@ -62,6 +62,36 @@ static uint8_t isSpawnColumnSafe (int x, int y, int z) {
   return true;
 }
 
+// Validates that spawn is not only locally safe, but also in a playable land area.
+static uint8_t isSpawnAreaPlayable (int x, int y, int z) {
+  if (!isSpawnColumnSafe(x, y, z)) return false;
+
+  uint8_t center_biome = getChunkBiome(div_floor(x, CHUNK_SIZE), div_floor(z, CHUNK_SIZE));
+  if (center_biome == W_beach) return false;
+
+  int land_cells = 0;
+  int water_cells = 0;
+  for (int dz = -4; dz <= 4; dz += 2) {
+    for (int dx = -4; dx <= 4; dx += 2) {
+      int sx = x + dx;
+      int sz = z + dz;
+      uint8_t h = getHeightAt(sx, sz);
+      uint8_t top = getBlockAt(sx, h, sz);
+      uint8_t above = getBlockAt(sx, h + 1, sz);
+      if (!isPassableBlock(top) && above == B_air && h >= 63) {
+        land_cells++;
+      } else if (above == B_water || top == B_water) {
+        water_cells++;
+      }
+    }
+  }
+
+  // Require enough nearby dry cells and reject clearly oceanic surroundings.
+  if (land_cells < 8) return false;
+  if (water_cells > 10) return false;
+  return true;
+}
+
 static uint8_t templateVisibilityCompatEnabled () {
 #ifdef CHUNK_TEMPLATE_VISIBILITY_COMPAT
   const char *enable_env = getenv("NETHR_ENABLE_TEMPLATE_CHUNKS");
@@ -74,7 +104,7 @@ static uint8_t templateVisibilityCompatEnabled () {
 void ensureWorldSpawn () {
   if (world_spawn_locked) {
     uint8_t biome = getChunkBiome(div_floor(world_spawn_x, CHUNK_SIZE), div_floor(world_spawn_z, CHUNK_SIZE));
-    if (biome != W_beach && isSpawnColumnSafe(world_spawn_x, world_spawn_y, world_spawn_z)) return;
+    if (biome != W_beach && isSpawnAreaPlayable(world_spawn_x, world_spawn_y, world_spawn_z)) return;
     printf(
       "Persisted world spawn invalid (x=%d y=%u z=%d, biome=%s), regenerating...\n",
       world_spawn_x, world_spawn_y, world_spawn_z, spawnBiomeName(biome)
@@ -82,11 +112,22 @@ void ensureWorldSpawn () {
     world_spawn_locked = false;
   }
 
+  uint64_t spawn_pick = splitmix64((((uint64_t)world_seed_raw) << 32) ^ (uint64_t)rng_seed_raw ^ 0x9E3779B97F4A7C15ULL);
+  int center_x = ((int)(spawn_pick & 0x3FF) - 512);
+  int center_z = ((int)((spawn_pick >> 10) & 0x3FF) - 512);
+  if (center_x > -64 && center_x < 64) center_x += (center_x < 0) ? -96 : 96;
+  if (center_z > -64 && center_z < 64) center_z += (center_z < 0) ? -96 : 96;
+  printf(
+    "Spawn search center (seeded): x=%d z=%d raw_pick=0x%08X%08X\n",
+    center_x, center_z, (unsigned int)(spawn_pick >> 32), (unsigned int)spawn_pick
+  );
+
   int best_score = -2147483647;
-  short best_x = 8;
-  short best_z = 8;
-  uint8_t best_y = getHeightAt(8, 8) + 1;
+  short best_x = (short)center_x;
+  short best_z = (short)center_z;
+  uint8_t best_y = getHeightAt(center_x, center_z) + 1;
   uint8_t best_biome = W_plains;
+  uint8_t found_candidate = false;
 
   // Scan a bounded radius around origin and pick a gentle, traversable area.
   for (int radius = 0; radius <= 128; radius += 8) {
@@ -94,15 +135,17 @@ void ensureWorldSpawn () {
       for (int z = -radius; z <= radius; z += 4) {
         if (radius > 0 && abs(x) != radius && abs(z) != radius) continue;
 
-        uint8_t y = getHeightAt(x, z);
+        int wx = center_x + x;
+        int wz = center_z + z;
+        uint8_t y = getHeightAt(wx, wz);
         if (y < 60 || y > 96) continue;
 
-        if (!isSpawnColumnSafe(x, y + 1, z)) continue;
+        if (!isSpawnAreaPlayable(wx, y + 1, wz)) continue;
 
-        uint8_t h_n = getHeightAt(x, z - 1);
-        uint8_t h_s = getHeightAt(x, z + 1);
-        uint8_t h_w = getHeightAt(x - 1, z);
-        uint8_t h_e = getHeightAt(x + 1, z);
+        uint8_t h_n = getHeightAt(wx, wz - 1);
+        uint8_t h_s = getHeightAt(wx, wz + 1);
+        uint8_t h_w = getHeightAt(wx - 1, wz);
+        uint8_t h_e = getHeightAt(wx + 1, wz);
         uint8_t h_min = h_n;
         uint8_t h_max = h_n;
         if (h_s < h_min) h_min = h_s;
@@ -114,14 +157,14 @@ void ensureWorldSpawn () {
         int slope = (int)h_max - (int)h_min;
         if (slope > 4) continue;
 
-        uint8_t biome = getChunkBiome(div_floor(x, CHUNK_SIZE), div_floor(z, CHUNK_SIZE));
+        uint8_t biome = getChunkBiome(div_floor(wx, CHUNK_SIZE), div_floor(wz, CHUNK_SIZE));
         if (biome == W_beach) continue;
 
         // Reject spots adjacent to water/lava at player feet level.
-        uint8_t feet_n = getBlockAt(x, y + 1, z - 1);
-        uint8_t feet_s = getBlockAt(x, y + 1, z + 1);
-        uint8_t feet_w = getBlockAt(x - 1, y + 1, z);
-        uint8_t feet_e = getBlockAt(x + 1, y + 1, z);
+        uint8_t feet_n = getBlockAt(wx, y + 1, wz - 1);
+        uint8_t feet_s = getBlockAt(wx, y + 1, wz + 1);
+        uint8_t feet_w = getBlockAt(wx - 1, y + 1, wz);
+        uint8_t feet_e = getBlockAt(wx + 1, y + 1, wz);
         if (feet_n == B_water || feet_s == B_water || feet_w == B_water || feet_e == B_water) continue;
         if (feet_n == B_lava || feet_s == B_lava || feet_w == B_lava || feet_e == B_lava) continue;
 
@@ -137,13 +180,79 @@ void ensureWorldSpawn () {
 
         if (score > best_score) {
           best_score = score;
+          best_x = (short)wx;
+          best_z = (short)wz;
+          best_y = (uint8_t)(y + 1);
+          best_biome = biome;
+          found_candidate = true;
+        }
+      }
+    }
+  }
+
+  if (!found_candidate) {
+    // Hard fallback: search a large area and force a land spawn.
+    // Phase 1 prefers plains-like starts; phase 2 accepts any non-beach land.
+    for (int phase = 0; phase < 2 && !found_candidate; phase++) {
+      for (int radius = 16; radius <= 1536 && !found_candidate; radius += 16) {
+        for (int x = -radius; x <= radius; x += 4) {
+          for (int z = -radius; z <= radius; z += 4) {
+            if (abs(x) != radius && abs(z) != radius) continue;
+            int wx = center_x + x;
+            int wz = center_z + z;
+            uint8_t y = getHeightAt(wx, wz);
+            if (y < 58 || y > 110) continue;
+            if (!isSpawnAreaPlayable(wx, y + 1, wz)) continue;
+
+            uint8_t biome = getChunkBiome(div_floor(wx, CHUNK_SIZE), div_floor(wz, CHUNK_SIZE));
+            if (biome == W_beach) continue;
+            if (phase == 0 && biome != W_plains && biome != W_snowy_plains) continue;
+
+            best_x = (short)wx;
+            best_z = (short)wz;
+            best_y = (uint8_t)(y + 1);
+            best_biome = biome;
+            best_score = 0;
+            found_candidate = true;
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  if (!found_candidate) {
+    printf(
+      "Spawn scan found no land candidate around seeded center; forcing origin fallback scan\n"
+    );
+    for (int radius = 0; radius <= 1024 && !found_candidate; radius += 16) {
+      for (int x = -radius; x <= radius; x += 4) {
+        for (int z = -radius; z <= radius; z += 4) {
+          if (radius > 0 && abs(x) != radius && abs(z) != radius) continue;
+          uint8_t y = getHeightAt(x, z);
+          if (!isSpawnAreaPlayable(x, y + 1, z)) continue;
+          uint8_t biome = getChunkBiome(div_floor(x, CHUNK_SIZE), div_floor(z, CHUNK_SIZE));
+          if (biome == W_beach) continue;
           best_x = (short)x;
           best_z = (short)z;
           best_y = (uint8_t)(y + 1);
           best_biome = biome;
+          best_score = -1;
+          found_candidate = true;
+          break;
         }
       }
     }
+  }
+
+  if (!found_candidate) {
+    // Last-resort safety net: keep player above water and not inside blocks.
+    best_x = 8;
+    best_z = 8;
+    best_y = getHeightAt(best_x, best_z) + 1;
+    while (best_y < WORLDGEN_HEIGHT_CAP && !isSpawnColumnSafe(best_x, best_y, best_z)) best_y++;
+    best_biome = getChunkBiome(div_floor(best_x, CHUNK_SIZE), div_floor(best_z, CHUNK_SIZE));
+    best_score = -9999;
   }
 
   world_spawn_x = best_x;
@@ -578,6 +687,10 @@ void spawnPlayer (PlayerData *player) {
 
   if (player->flags & 0x02) { // Is this a new player?
     // Use server-selected world spawn for first login.
+    printf(
+      "Spawn source: new-player world spawn (x=%d y=%u z=%d)\n",
+      world_spawn_x, world_spawn_y, world_spawn_z
+    );
     player->x = world_spawn_x;
     player->z = world_spawn_z;
     player->y = world_spawn_y;
@@ -587,6 +700,20 @@ void spawnPlayer (PlayerData *player) {
     player->flags &= ~0x02;
   } else { // Not a new player
     // Calculate spawn position from player data
+    printf(
+      "Spawn source: stored player position (x=%d y=%u z=%d)\n",
+      player->x, player->y, player->z
+    );
+    if (!isSpawnAreaPlayable(player->x, player->y, player->z)) {
+      printf(
+        "Stored player position unsafe (x=%d y=%u z=%d), moving to world spawn (x=%d y=%u z=%d)\n",
+        player->x, player->y, player->z,
+        world_spawn_x, world_spawn_y, world_spawn_z
+      );
+      player->x = world_spawn_x;
+      player->y = world_spawn_y;
+      player->z = world_spawn_z;
+    }
     spawn_x = (float)player->x + 0.5;
     spawn_y = player->y;
     spawn_z = (float)player->z + 0.5;
