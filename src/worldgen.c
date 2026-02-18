@@ -143,6 +143,48 @@ static uint8_t getLocalSlopeAt (int x, int z) {
   return (uint8_t)(h_max - h_min);
 }
 
+static float absf_local (float v) {
+  return v < 0.0f ? -v : v;
+}
+
+static float samplePseudo3DCaveNoise (int x, int y, int z) {
+  // Cheap 3D-ish field via y-warped 2D samples (faster than full valueNoise3D).
+  float a = valueNoise2D(x + y * 2, z - y * 2, 28, 0xB13D7A9C24E65F01ULL) * 2.0f - 1.0f;
+  float b = valueNoise2D(x - y * 3, z + y, 14, 0xC57E19A40D2B6F83ULL) * 2.0f - 1.0f;
+  float c = valueNoise2D(x + y * 5, z + y * 2, 8, 0x91F24DE37A6BC105ULL) * 2.0f - 1.0f;
+  return absf_local(a) * 0.50f + absf_local(b) * 0.32f + absf_local(c) * 0.18f;
+}
+
+static uint8_t isCaveOpenAt (int x, int y, int z, uint8_t surface_height) {
+  if (y <= 1) return false;
+  if (y >= (int)surface_height - 5) return false;
+
+  float cave_field = samplePseudo3DCaveNoise(x, y, z);
+  float cavern = valueNoise2D(x + y, z + y * 2, 52, 0x2AC9157DB03E64F1ULL);
+  float roughness = valueNoise2D(x, z, 24, 0xE43BD8217A6F19C5ULL);
+
+  // Wider cave bands in the lower/mid underground, tighter near surface.
+  float depth = (float)((int)surface_height - y);
+  float depth_t = depth / 80.0f;
+  if (depth_t < 0.0f) depth_t = 0.0f;
+  if (depth_t > 1.0f) depth_t = 1.0f;
+  float threshold = 0.20f + depth_t * 0.16f + (roughness - 0.5f) * 0.04f;
+
+  // Rare larger caverns.
+  if (y > 8 && y < 56 && cavern > 0.74f && cave_field < 0.62f) return true;
+  return cave_field < threshold;
+}
+
+static uint8_t getAquiferFluidAt (int x, int y, int z) {
+  if (y < 8) return B_lava;
+  if (y >= 64) return B_air;
+
+  float aquifer = valueNoise2D(x, z, 40, 0x7F21CD94AE630B15ULL);
+  int fluid_level = 40 + (int)(aquifer * 24.0f); // 40..64
+  if (y <= fluid_level) return B_water;
+  return B_air;
+}
+
 static uint8_t shouldPlaceRiverSurfaceWater (int x, int z, uint8_t height, uint8_t biome, float river_mask) {
   if (biome == W_desert || biome == W_beach) return false;
   // Keep river surface close to sea level to avoid random floating water.
@@ -738,9 +780,12 @@ uint8_t getTerrainAtFromCache (int x, int y, int z, int rx, int rz, ChunkAnchor 
   }
   // Starting at 4 blocks below terrain level, generate minerals and caves
   if (y <= height - 4) {
-    // Caves use the same shape as surface terrain, just mirrored
-    int8_t gap = height - TERRAIN_BASE_HEIGHT;
-    if (y < CAVE_BASE_DEPTH + gap && y > CAVE_BASE_DEPTH - gap) return B_air;
+    // Coherent cave field + aquifer/lava fluid fill.
+    if (isCaveOpenAt(x, y, z, height)) {
+      uint8_t fluid = getAquiferFluidAt(x, y, z);
+      if (fluid != B_air) return fluid;
+      return B_air;
+    }
 
     // The chunk-relative X and Z coordinates are used as the seed for an
     // Xorshift RNG/hash function to generate the Y coordinate of the ore
