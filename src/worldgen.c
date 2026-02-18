@@ -601,6 +601,26 @@ uint8_t getTerrainAtFromCache (int x, int y, int z, int rx, int rz, ChunkAnchor 
       // Surface decorator pass: deterministic biome-specific patches/clusters.
       uint8_t deco = (uint8_t)((getCoordinateHash(x, 0, z) >> 9) & 255);
       uint8_t deco_hi = (uint8_t)((getCoordinateHash(x, 9, z) >> 11) & 255);
+      uint8_t flowers_plain_chance = scaleChanceU8(
+        WORLDGEN_PLAINS_FLOWER_CHANCE,
+        WORLDGEN_DECOR_DENSITY_SCALE * WORLDGEN_FLOWER_DENSITY_SCALE
+      );
+      uint8_t flowers_snow_chance = scaleChanceU8(
+        (uint8_t)(WORLDGEN_PLAINS_FLOWER_CHANCE / 2),
+        WORLDGEN_DECOR_DENSITY_SCALE * WORLDGEN_FLOWER_DENSITY_SCALE
+      );
+      uint8_t mushrooms_plain_chance = scaleChanceU8(
+        WORLDGEN_PLAINS_MUSHROOM_CHANCE,
+        WORLDGEN_MUSHROOM_DENSITY_SCALE
+      );
+      uint8_t mushrooms_snow_chance = scaleChanceU8(
+        WORLDGEN_SNOWY_MUSHROOM_CHANCE,
+        WORLDGEN_MUSHROOM_DENSITY_SCALE
+      );
+      uint8_t mushrooms_swamp_chance = scaleChanceU8(
+        WORLDGEN_SWAMP_MUSHROOM_CHANCE,
+        WORLDGEN_MUSHROOM_DENSITY_SCALE
+      );
       uint8_t surface = getSurfaceBlockForBiome(anchor.biome, variant, height);
       if (anchor.biome == W_plains) {
         if (surface == B_grass_block) {
@@ -621,10 +641,10 @@ uint8_t getTerrainAtFromCache (int x, int y, int z, int rx, int rz, ChunkAnchor 
           );
           if (
             flower_patch > ((float)WORLDGEN_FLOWER_PATCH_THRESHOLD / 100.0f) &&
-            deco < scaleChanceU8(WORLDGEN_PLAINS_FLOWER_CHANCE, WORLDGEN_DECOR_DENSITY_SCALE)
+            deco < flowers_plain_chance
           ) return getFlowerBlockFromHash(getCoordinateHash(x, 1, z), W_plains);
 
-          if (deco < scaleChanceU8(WORLDGEN_PLAINS_MUSHROOM_CHANCE, WORLDGEN_DECOR_DENSITY_SCALE)) {
+          if (deco < mushrooms_plain_chance) {
             return ((getCoordinateHash(x, 5, z) & 1) == 0) ? B_brown_mushroom : B_red_mushroom;
           }
 
@@ -636,15 +656,15 @@ uint8_t getTerrainAtFromCache (int x, int y, int z, int rx, int rz, ChunkAnchor 
       } else if (anchor.biome == W_desert) {
         if (deco < scaleChanceU8(WORLDGEN_DESERT_DEAD_BUSH_CHANCE, WORLDGEN_DECOR_DENSITY_SCALE)) return B_dead_bush;
       } else if (anchor.biome == W_snowy_plains) {
-        if (deco < scaleChanceU8(WORLDGEN_SNOWY_MUSHROOM_CHANCE, WORLDGEN_DECOR_DENSITY_SCALE)) {
+        if (deco < mushrooms_snow_chance) {
           return ((getCoordinateHash(x, 6, z) & 1) == 0) ? B_brown_mushroom : B_red_mushroom;
         }
-        if (deco < scaleChanceU8((uint8_t)(WORLDGEN_PLAINS_FLOWER_CHANCE / 2), WORLDGEN_DECOR_DENSITY_SCALE)) {
+        if (deco < flowers_snow_chance) {
           return getFlowerBlockFromHash(getCoordinateHash(x, 7, z), W_snowy_plains);
         }
         if (deco < scaleChanceU8(WORLDGEN_SNOWY_GRASS_CHANCE, WORLDGEN_DECOR_DENSITY_SCALE)) return B_short_grass;
       } else if (anchor.biome == W_mangrove_swamp) {
-        if (deco < scaleChanceU8(WORLDGEN_SWAMP_MUSHROOM_CHANCE, WORLDGEN_DECOR_DENSITY_SCALE) && y > 64) {
+        if (deco < mushrooms_swamp_chance && y > 64) {
           return ((getCoordinateHash(x, 8, z) & 1) == 0) ? B_brown_mushroom : B_red_mushroom;
         }
         if (deco < scaleChanceU8((uint8_t)(WORLDGEN_SWAMP_GRASS_CHANCE / 2), WORLDGEN_DECOR_DENSITY_SCALE) && y > 64) return B_fern;

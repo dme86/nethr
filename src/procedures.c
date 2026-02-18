@@ -784,8 +784,8 @@ void spawnPlayer (PlayerData *player) {
 
   // Send spawn chunk first
   sc_chunkDataAndUpdateLight(player->client_fd, _x, _z);
-  for (int i = -VIEW_DISTANCE; i <= VIEW_DISTANCE; i ++) {
-    for (int j = -VIEW_DISTANCE; j <= VIEW_DISTANCE; j ++) {
+  for (int i = -view_distance; i <= view_distance; i ++) {
+    for (int j = -view_distance; j <= view_distance; j ++) {
       if (i == 0 && j == 0) continue;
       sc_chunkDataAndUpdateLight(player->client_fd, _x + i, _z + j);
     }

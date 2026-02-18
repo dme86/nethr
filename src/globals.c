@@ -43,6 +43,7 @@ uint8_t world_spawn_locked = false;
 
 uint16_t world_time = 0;
 uint32_t server_ticks = 0;
+int view_distance = VIEW_DISTANCE;
 
 char motd[] = { "A nethr server" };
 uint8_t motd_len = sizeof(motd) - 1;

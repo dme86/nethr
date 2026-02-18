@@ -60,6 +60,16 @@ static uint8_t parseSeedOverride (const char *env_name, uint32_t *out) {
   return true;
 }
 
+static uint8_t parseIntOverride (const char *env_name, int *out) {
+  const char *value = getenv(env_name);
+  if (value == NULL || value[0] == '\0') return false;
+  char *end = NULL;
+  long parsed = strtol(value, &end, 10);
+  if (end == NULL || *end != '\0') return false;
+  *out = (int)parsed;
+  return true;
+}
+
 #if !defined(ESP_PLATFORM) && !defined(_WIN32)
 
 #define ADMIN_PIPE_PATH "/tmp/nethr-admin.pipe"
@@ -447,8 +457,8 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
           // Gate spawn attempts to preserve tick stability.
           if (r % PASSIVE_SPAWN_CHANCE == 0) {
             // Spawn candidate near chunk edge in movement direction.
-            short mob_x = (_x + dx * VIEW_DISTANCE) * 16 + ((r >> 4) & 15);
-            short mob_z = (_z + dz * VIEW_DISTANCE) * 16 + ((r >> 8) & 15);
+            short mob_x = (_x + dx * view_distance) * 16 + ((r >> 4) & 15);
+            short mob_z = (_z + dz * view_distance) * 16 + ((r >> 8) & 15);
             // Search upward for a valid spawn column.
             uint8_t mob_y = cy - 8;
             uint8_t b_low = getBlockAt(mob_x, mob_y - 1, mob_z);
@@ -500,21 +510,21 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
         sc_setCenterChunk(client_fd, _x, _z);
 
         while (dx != 0) {
-          sc_chunkDataAndUpdateLight(client_fd, _x + dx * VIEW_DISTANCE, _z);
+          sc_chunkDataAndUpdateLight(client_fd, _x + dx * view_distance, _z);
           count ++;
-          for (int i = 1; i <= VIEW_DISTANCE; i ++) {
-            sc_chunkDataAndUpdateLight(client_fd, _x + dx * VIEW_DISTANCE, _z - i);
-            sc_chunkDataAndUpdateLight(client_fd, _x + dx * VIEW_DISTANCE, _z + i);
+          for (int i = 1; i <= view_distance; i ++) {
+            sc_chunkDataAndUpdateLight(client_fd, _x + dx * view_distance, _z - i);
+            sc_chunkDataAndUpdateLight(client_fd, _x + dx * view_distance, _z + i);
             count += 2;
           }
           dx += dx > 0 ? -1 : 1;
         }
         while (dz != 0) {
-          sc_chunkDataAndUpdateLight(client_fd, _x, _z + dz * VIEW_DISTANCE);
+          sc_chunkDataAndUpdateLight(client_fd, _x, _z + dz * view_distance);
           count ++;
-          for (int i = 1; i <= VIEW_DISTANCE; i ++) {
-            sc_chunkDataAndUpdateLight(client_fd, _x - i, _z + dz * VIEW_DISTANCE);
-            sc_chunkDataAndUpdateLight(client_fd, _x + i, _z + dz * VIEW_DISTANCE);
+          for (int i = 1; i <= view_distance; i ++) {
+            sc_chunkDataAndUpdateLight(client_fd, _x - i, _z + dz * view_distance);
+            sc_chunkDataAndUpdateLight(client_fd, _x + i, _z + dz * view_distance);
             count += 2;
           }
           dz += dz > 0 ? -1 : 1;
@@ -645,6 +655,13 @@ int main () {
   if (parseSeedOverride("NETHR_RNG_SEED", &rng_seed_raw)) {
     printf("Seed override: NETHR_RNG_SEED=%u\n", rng_seed_raw);
   }
+  int view_distance_override = 0;
+  if (parseIntOverride("NETHR_VIEW_DISTANCE", &view_distance_override)) {
+    if (view_distance_override < 2) view_distance_override = 2;
+    if (view_distance_override > 16) view_distance_override = 16;
+    view_distance = view_distance_override;
+    printf("View distance override: NETHR_VIEW_DISTANCE=%d\n", view_distance);
+  }
 
   // Hash runtime seeds before first use.
   world_seed = splitmix64(world_seed_raw);
@@ -660,6 +677,7 @@ int main () {
   if (world_spawn_locked) {
     printf("World spawn (from meta): x=%d y=%u z=%d\n", world_spawn_x, world_spawn_y, world_spawn_z);
   }
+  printf("View distance: %d\n", view_distance);
   printf("\n");
 
   // Mark all block-change slots as unused.

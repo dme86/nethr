@@ -48,7 +48,7 @@
 
 // Max render distance, determines how many chunks to send
 #ifndef VIEW_DISTANCE
-  #define VIEW_DISTANCE 2
+  #define VIEW_DISTANCE 8
 #endif
 
 // Tick interval in microseconds (default 1s).
@@ -195,10 +195,16 @@
 // Scales sparse Notchian-derived placement rates to this project's simplified
 // single-pass decorator pipeline.
 #ifndef WORLDGEN_DECOR_DENSITY_SCALE
-  #define WORLDGEN_DECOR_DENSITY_SCALE 6
+  #define WORLDGEN_DECOR_DENSITY_SCALE 3
 #endif
 #ifndef WORLDGEN_TREE_DENSITY_SCALE
   #define WORLDGEN_TREE_DENSITY_SCALE 5
+#endif
+#ifndef WORLDGEN_FLOWER_DENSITY_SCALE
+  #define WORLDGEN_FLOWER_DENSITY_SCALE 2
+#endif
+#ifndef WORLDGEN_MUSHROOM_DENSITY_SCALE
+  #define WORLDGEN_MUSHROOM_DENSITY_SCALE 1
 #endif
 
 // Terrain shape tuning (overridable via -D... build flags).
@@ -339,6 +345,7 @@ extern uint8_t world_spawn_locked;
 
 extern uint16_t world_time;
 extern uint32_t server_ticks;
+extern int view_distance;
 
 extern char motd[];
 extern uint8_t motd_len;

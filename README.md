@@ -76,6 +76,8 @@ Runtime chunk pipeline:
 - Default: use procedural chunk generation (better biome continuity, less repetition).
 - Optional template mode: use Notchian-captured templates for compatibility testing.
   - `NETHR_ENABLE_TEMPLATE_CHUNKS=1 make run`
+- Runtime view distance override:
+  - `NETHR_VIEW_DISTANCE=8 make run` (clamped to `2..16`)
 
 ## Admin System Chat Pipe (Linux)
 On Linux builds, nethr creates:

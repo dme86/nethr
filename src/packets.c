@@ -905,8 +905,8 @@ int sc_loginPlay (int client_fd) {
     sizeVarInt(dimension_count) +
     dimensions_len +
     sizeVarInt(MAX_PLAYERS) +
-    sizeVarInt(VIEW_DISTANCE) +
-    sizeVarInt(VIEW_DISTANCE) +
+    sizeVarInt(view_distance) +
+    sizeVarInt(view_distance) +
     1 + 1 + 1 +
     common_spawn_info_len +
     1;
@@ -932,8 +932,8 @@ int sc_loginPlay (int client_fd) {
     off += (size_t)len;
   }
   off = appendVarInt(login_dbg, off, MAX_PLAYERS);
-  off = appendVarInt(login_dbg, off, VIEW_DISTANCE);
-  off = appendVarInt(login_dbg, off, VIEW_DISTANCE);
+  off = appendVarInt(login_dbg, off, view_distance);
+  off = appendVarInt(login_dbg, off, view_distance);
   off = appendByte(login_dbg, off, 0);
   off = appendByte(login_dbg, off, true);
   off = appendByte(login_dbg, off, false);
@@ -974,9 +974,9 @@ int sc_loginPlay (int client_fd) {
   // Maxplayers
   writeVarInt(client_fd, MAX_PLAYERS);
   // View distance
-  writeVarInt(client_fd, VIEW_DISTANCE);
+  writeVarInt(client_fd, view_distance);
   // Sim distance
-  writeVarInt(client_fd, VIEW_DISTANCE);
+  writeVarInt(client_fd, view_distance);
   // Reduced debug info
   writeByte(client_fd, 0);
   // Respawn screen
