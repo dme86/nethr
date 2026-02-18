@@ -114,6 +114,35 @@ static uint8_t scaleChanceU8 (uint8_t base, int scale) {
   return (uint8_t)v;
 }
 
+static float getRiverChannelMask (int x, int z) {
+  // Coherent river mask shared between biome/height/surface rules.
+  float river_primary = valueNoise2D(x, z, 36, 0xF13A5B9C6D7E8A01ULL) * 2.0f - 1.0f;
+  float river_secondary = valueNoise2D(x, z, 14, 0x29CE4AB1D70685F3ULL) * 2.0f - 1.0f;
+  float river_abs0 = river_primary < 0.0f ? -river_primary : river_primary;
+  float river_abs1 = river_secondary < 0.0f ? -river_secondary : river_secondary;
+  float river_shape = river_abs0 * 0.72f + river_abs1 * 0.28f;
+  float mask = (0.16f - river_shape) / 0.16f;
+  if (mask < 0.0f) mask = 0.0f;
+  if (mask > 1.0f) mask = 1.0f;
+  return mask;
+}
+
+static uint8_t getLocalSlopeAt (int x, int z) {
+  int h_n = getHeightAt(x, z - 1);
+  int h_s = getHeightAt(x, z + 1);
+  int h_w = getHeightAt(x - 1, z);
+  int h_e = getHeightAt(x + 1, z);
+  int h_min = h_n;
+  int h_max = h_n;
+  if (h_s < h_min) h_min = h_s;
+  if (h_w < h_min) h_min = h_w;
+  if (h_e < h_min) h_min = h_e;
+  if (h_s > h_max) h_max = h_s;
+  if (h_w > h_max) h_max = h_w;
+  if (h_e > h_max) h_max = h_e;
+  return (uint8_t)(h_max - h_min);
+}
+
 static uint32_t getCoordinateHash (int x, int y, int z) {
   uint64_t xy = ((uint64_t)(uint32_t)x << 32) | (uint32_t)y;
   uint64_t h = splitmix64(xy ^ world_seed);
@@ -509,6 +538,8 @@ uint8_t getHeightAt (int x, int z) {
 
 uint8_t getTerrainAtFromCache (int x, int y, int z, int rx, int rz, ChunkAnchor anchor, ChunkFeature feature, uint8_t height) {
   uint8_t variant = (anchor.hash >> 20) & 3;
+  float river_mask = getRiverChannelMask(x, z);
+  uint8_t slope = 0;
 
   if (y >= 64 && y >= height && feature.y != 255) switch (anchor.biome) {
     case W_plains:
@@ -594,10 +625,35 @@ uint8_t getTerrainAtFromCache (int x, int y, int z, int rx, int rz, ChunkAnchor 
   // Handle surface-level terrain (the very topmost blocks)
   if (height >= 63) {
     if (y == height) {
+      // Vanilla-like surface-rule approximation:
+      // rivers get gravel/sand beds, steep zones expose stone.
+      if (river_mask > 0.74f && anchor.biome != W_desert && anchor.biome != W_beach && height >= 58 && height <= 82) {
+        return B_gravel;
+      }
+      slope = getLocalSlopeAt(x, z);
+      if (slope >= 7 && height >= 76 && anchor.biome != W_mangrove_swamp) {
+        return B_stone;
+      }
       return getSurfaceBlockForBiome(anchor.biome, variant, height);
     }
     if (y == height + 1 && height >= 64) {
+      // Fill carved river channels with visible surface water.
+      if (river_mask > 0.80f && anchor.biome != W_desert && anchor.biome != W_beach && height >= 60 && height <= 82) {
+        return B_water;
+      }
+
       if (isWaterfallSpringCandidate(x, z, height, anchor.biome)) return B_water;
+
+      // Extra waterfall candidates where strong river channels hit cliff edges.
+      if (slope == 0) slope = getLocalSlopeAt(x, z);
+      if (
+        river_mask > 0.86f &&
+        slope >= 8 &&
+        height >= 76 &&
+        anchor.biome != W_desert &&
+        anchor.biome != W_beach
+      ) return B_water;
+
       // Surface decorator pass: deterministic biome-specific patches/clusters.
       uint8_t deco = (uint8_t)((getCoordinateHash(x, 0, z) >> 9) & 255);
       uint8_t deco_hi = (uint8_t)((getCoordinateHash(x, 9, z) >> 11) & 255);
