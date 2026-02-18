@@ -197,14 +197,12 @@ uint8_t getChunkBiome (short x, short z) {
 uint8_t getCornerHeight (short anchor_x, short anchor_z, uint32_t hash, uint8_t biome) {
   (void)hash;
 
-  // Vanilla-inspired macro signals:
-  // - continentalness (very low frequency) controls broad landmass/elevation
-  // - erosion modulates roughness and flattened basins
-  // - ridges/folded ridges control mountain chain placement
-  float continental = valueNoise2D(anchor_x, anchor_z, WORLDGEN_CONTINENT_SCALE, 0x4E3F9C27D1B6508AULL);
-  float erosion = valueNoise2D(anchor_x, anchor_z, WORLDGEN_EROSION_SCALE, 0x8AF1C94372DE10B5ULL);
-  float ridge_src = valueNoise2D(anchor_x, anchor_z, WORLDGEN_RIDGE_SCALE, 0xB7D2186E9035AC41ULL);
-  float ridge = ridge_src * 2.0f - 1.0f;
+  // Vanilla-like macro signals in [-1..1]:
+  // continentalness (landmass), erosion (roughness), ridges (mountain chains).
+  float continental = valueNoise2D(anchor_x, anchor_z, WORLDGEN_CONTINENT_SCALE, 0x4E3F9C27D1B6508AULL) * 2.0f - 1.0f;
+  float erosion = valueNoise2D(anchor_x, anchor_z, WORLDGEN_EROSION_SCALE, 0x8AF1C94372DE10B5ULL) * 2.0f - 1.0f;
+  float ridge_src = valueNoise2D(anchor_x, anchor_z, WORLDGEN_RIDGE_SCALE, 0xB7D2186E9035AC41ULL) * 2.0f - 1.0f;
+  float ridge = ridge_src;
   float ridge_abs = ridge < 0.0f ? -ridge : ridge;
   float ridge_folded = -3.0f * (-0.33333333f + (((ridge_abs - 0.66666667f) < 0.0f ? -(ridge_abs - 0.66666667f) : (ridge_abs - 0.66666667f))));
   if (ridge_folded < 0.0f) ridge_folded = 0.0f;
@@ -214,13 +212,12 @@ uint8_t getCornerHeight (short anchor_x, short anchor_z, uint32_t hash, uint8_t 
   float rolling = fractalNoise2D(anchor_x, anchor_z, 0x11E96B3AA7E5B74DULL) - 0.5f;
   float hills = valueNoise2D(anchor_x, anchor_z, 10, 0x4C8A7D13F20B5E91ULL) - 0.5f;
 
-  // Valleys are broad and cohesive where continentalness is lower
-  // and erosion is higher (flattened/cut terrain).
+  // Broad valleys for high erosion and low-mid continentalness.
   float valley_mask = 0.0f;
-  float valley_continent_max = (float)WORLDGEN_VALLEY_CONTINENT_MAX / 100.0f;
-  float valley_erosion_min = (float)WORLDGEN_VALLEY_EROSION_MIN / 100.0f;
+  float valley_continent_max = (float)WORLDGEN_VALLEY_CONTINENT_MAX / 100.0f * 2.0f - 1.0f;
+  float valley_erosion_min = (float)WORLDGEN_VALLEY_EROSION_MIN / 100.0f * 2.0f - 1.0f;
   if (continental < valley_continent_max && erosion > valley_erosion_min) {
-    float c = (valley_continent_max - continental) / valley_continent_max;
+    float c = (valley_continent_max - continental) / (valley_continent_max + 1.0f);
     float e = (erosion - valley_erosion_min) / (1.0f - valley_erosion_min);
     valley_mask = c * e;
     if (valley_mask > 1.0f) valley_mask = 1.0f;
@@ -228,11 +225,11 @@ uint8_t getCornerHeight (short anchor_x, short anchor_z, uint32_t hash, uint8_t 
   }
 
   float mountain_t = 0.0f;
-  float mountain_continent_min = (float)WORLDGEN_MOUNTAIN_CONTINENT_MIN / 100.0f;
-  float mountain_erosion_max = (float)WORLDGEN_MOUNTAIN_EROSION_MAX / 100.0f;
+  float mountain_continent_min = (float)WORLDGEN_MOUNTAIN_CONTINENT_MIN / 100.0f * 2.0f - 1.0f;
+  float mountain_erosion_max = (float)WORLDGEN_MOUNTAIN_EROSION_MAX / 100.0f * 2.0f - 1.0f;
   if (continental > mountain_continent_min && erosion < mountain_erosion_max) {
     float c = (continental - mountain_continent_min) / (1.0f - mountain_continent_min);
-    float e = (mountain_erosion_max - erosion) / mountain_erosion_max;
+    float e = (mountain_erosion_max - erosion) / (mountain_erosion_max + 1.0f);
     float r = ridge_folded;
     mountain_t = c * e * r;
     if (mountain_t > 1.0f) mountain_t = 1.0f;
@@ -263,15 +260,27 @@ uint8_t getCornerHeight (short anchor_x, short anchor_z, uint32_t hash, uint8_t 
       break;
   }
 
-  float height_f = (float)TERRAIN_BASE_HEIGHT + biome_base;
-  // Continentalness gives broad rises/sinks across long distances.
-  height_f += (continental - 0.5f) * 18.0f;
+  // Piecewise continental baseline, inspired by Overworld continental bands:
+  // deep ocean < -0.55, ocean/coast until ~-0.15, inland beyond.
+  float height_f;
+  if (continental < -0.55f) {
+    height_f = 49.0f + (continental + 1.0f) * 8.0f;
+  } else if (continental < -0.15f) {
+    height_f = 58.0f + (continental + 0.55f) * 15.0f;
+  } else {
+    height_f = 64.0f + (continental + 0.15f) * 28.0f;
+  }
+  height_f += biome_base;
+
+  // Erosion flattens terrain for high values and sharpens for low values.
+  float erosion_shape = 0.0f - erosion;
+  height_f += erosion_shape * 5.0f;
   height_f += rolling * (float)WORLDGEN_ROLLING_AMPLITUDE * biome_shape_scale;
   height_f += hills * (float)WORLDGEN_HILL_AMPLITUDE * biome_shape_scale;
   height_f -= valley_mask * (float)WORLDGEN_VALLEY_DEPTH;
 
   if (mountain_t > 0.0f) {
-    // Mountains are rare and chunk-spanning by design.
+    // Mountains stay rare and chunk-spanning.
     float mountain_gain = (0.35f + ridge_folded * 0.65f) * mountain_t * (float)WORLDGEN_MOUNTAIN_AMPLITUDE;
     if (biome == W_snowy_plains) mountain_gain *= 1.15f;
     if (biome == W_mangrove_swamp) mountain_gain *= 0.45f;
