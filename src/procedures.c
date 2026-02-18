@@ -46,8 +46,41 @@ static const char *spawnBiomeName (uint8_t biome) {
   }
 }
 
+static uint8_t isSpawnColumnSafe (int x, int y, int z) {
+  if (y < 1 || y > WORLDGEN_HEIGHT_CAP) return false;
+  uint8_t below = getBlockAt(x, y - 1, z);
+  uint8_t feet = getBlockAt(x, y, z);
+  uint8_t head = getBlockAt(x, y + 1, z);
+  if (isPassableBlock(below)) return false;
+  if (feet != B_air || head != B_air) return false;
+  uint8_t n = getBlockAt(x, y, z - 1);
+  uint8_t s = getBlockAt(x, y, z + 1);
+  uint8_t w = getBlockAt(x - 1, y, z);
+  uint8_t e = getBlockAt(x + 1, y, z);
+  if (n == B_water || s == B_water || w == B_water || e == B_water) return false;
+  if (n == B_lava || s == B_lava || w == B_lava || e == B_lava) return false;
+  return true;
+}
+
+static uint8_t templateVisibilityCompatEnabled () {
+#ifdef CHUNK_TEMPLATE_VISIBILITY_COMPAT
+  const char *enable_env = getenv("NETHR_ENABLE_TEMPLATE_CHUNKS");
+  return (enable_env != NULL && enable_env[0] == '1');
+#else
+  return false;
+#endif
+}
+
 void ensureWorldSpawn () {
-  if (world_spawn_locked) return;
+  if (world_spawn_locked) {
+    uint8_t biome = getChunkBiome(div_floor(world_spawn_x, CHUNK_SIZE), div_floor(world_spawn_z, CHUNK_SIZE));
+    if (biome != W_beach && isSpawnColumnSafe(world_spawn_x, world_spawn_y, world_spawn_z)) return;
+    printf(
+      "Persisted world spawn invalid (x=%d y=%u z=%d, biome=%s), regenerating...\n",
+      world_spawn_x, world_spawn_y, world_spawn_z, spawnBiomeName(biome)
+    );
+    world_spawn_locked = false;
+  }
 
   int best_score = -2147483647;
   short best_x = 8;
@@ -64,11 +97,7 @@ void ensureWorldSpawn () {
         uint8_t y = getHeightAt(x, z);
         if (y < 60 || y > 96) continue;
 
-        uint8_t block = getBlockAt(x, y, z);
-        uint8_t feet = getBlockAt(x, y + 1, z);
-        uint8_t head = getBlockAt(x, y + 2, z);
-        if (isPassableBlock(block)) continue;
-        if (!isPassableSpawnBlock(feet) || !isPassableSpawnBlock(head)) continue;
+        if (!isSpawnColumnSafe(x, y + 1, z)) continue;
 
         uint8_t h_n = getHeightAt(x, z - 1);
         uint8_t h_s = getHeightAt(x, z + 1);
@@ -86,6 +115,15 @@ void ensureWorldSpawn () {
         if (slope > 4) continue;
 
         uint8_t biome = getChunkBiome(div_floor(x, CHUNK_SIZE), div_floor(z, CHUNK_SIZE));
+        if (biome == W_beach) continue;
+
+        // Reject spots adjacent to water/lava at player feet level.
+        uint8_t feet_n = getBlockAt(x, y + 1, z - 1);
+        uint8_t feet_s = getBlockAt(x, y + 1, z + 1);
+        uint8_t feet_w = getBlockAt(x - 1, y + 1, z);
+        uint8_t feet_e = getBlockAt(x + 1, y + 1, z);
+        if (feet_n == B_water || feet_s == B_water || feet_w == B_water || feet_e == B_water) continue;
+        if (feet_n == B_lava || feet_s == B_lava || feet_w == B_lava || feet_e == B_lava) continue;
 
         int score = 200;
         if (biome == W_plains) score += 220;
@@ -557,10 +595,12 @@ void spawnPlayer (PlayerData *player) {
   }
 
   #ifdef CHUNK_TEMPLATE_VISIBILITY_COMPAT
-    // Template chunks were captured around y~112.
-    // Use a stable spawn height in compatibility mode.
-    spawn_y = 112.0f;
-    player->y = 112;
+    if (templateVisibilityCompatEnabled()) {
+      // Template chunks were captured around y~112.
+      // Use a stable spawn height only in explicit template mode.
+      spawn_y = 112.0f;
+      player->y = 112;
+    }
   #endif
 
   // Teleport player to spawn coordinates (first pass)
@@ -603,7 +643,7 @@ void spawnPlayer (PlayerData *player) {
   printf("Spawn sequence: set_default_spawn_position + game_event(wait_chunks) + set_chunk_cache_center\n");
   int default_spawn_y = world_spawn_y;
   #ifdef CHUNK_TEMPLATE_VISIBILITY_COMPAT
-    default_spawn_y = 112;
+    if (templateVisibilityCompatEnabled()) default_spawn_y = 112;
   #endif
   sc_setDefaultSpawnPosition(
     player->client_fd, "minecraft:overworld",

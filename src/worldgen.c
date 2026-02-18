@@ -145,80 +145,94 @@ uint8_t getChunkBiome (short x, short z) {
 
 }
 
-uint8_t getCornerHeight (uint32_t hash, uint8_t biome) {
+uint8_t getCornerHeight (short anchor_x, short anchor_z, uint32_t hash, uint8_t biome) {
+  (void)hash;
 
-  // When calculating the height, parts of the hash are used as random values.
-  // Often, multiple values are stacked to stabilize the distribution while
-  // Allowing for occasionally larger variances.
-  uint8_t height = TERRAIN_BASE_HEIGHT;
+  // Vanilla-inspired macro signals:
+  // - continentalness (very low frequency) controls broad landmass/elevation
+  // - erosion modulates roughness and flattened basins
+  // - ridges/folded ridges control mountain chain placement
+  float continental = valueNoise2D(anchor_x, anchor_z, WORLDGEN_CONTINENT_SCALE, 0x4E3F9C27D1B6508AULL);
+  float erosion = valueNoise2D(anchor_x, anchor_z, WORLDGEN_EROSION_SCALE, 0x8AF1C94372DE10B5ULL);
+  float ridge_src = valueNoise2D(anchor_x, anchor_z, WORLDGEN_RIDGE_SCALE, 0xB7D2186E9035AC41ULL);
+  float ridge = ridge_src * 2.0f - 1.0f;
+  float ridge_abs = ridge < 0.0f ? -ridge : ridge;
+  float ridge_folded = -3.0f * (-0.33333333f + (((ridge_abs - 0.66666667f) < 0.0f ? -(ridge_abs - 0.66666667f) : (ridge_abs - 0.66666667f))));
+  if (ridge_folded < 0.0f) ridge_folded = 0.0f;
+  if (ridge_folded > 1.0f) ridge_folded = 1.0f;
 
-  uint8_t variant = (hash >> 20) & 3;
+  // Secondary local relief so plains are not flat carpets.
+  float rolling = fractalNoise2D(anchor_x, anchor_z, 0x11E96B3AA7E5B74DULL) - 0.5f;
+  float hills = valueNoise2D(anchor_x, anchor_z, 10, 0x4C8A7D13F20B5E91ULL) - 0.5f;
 
-  switch (biome) {
-
-    case W_mangrove_swamp: {
-      height += (
-        (hash % 3) +
-        ((hash >> 4) % 3) +
-        ((hash >> 8) % 3) +
-        ((hash >> 12) % 3)
-      );
-      // If height dips below sea level, push it down further
-      // This ends up creating many large ponds of water
-      if (height < 64) height -= (hash >> 24) & 3;
-      break;
-    }
-
-    case W_plains: {
-      height += (
-        (hash & 3) +
-        (hash >> 4 & 3) +
-        (hash >> 8 & 3) +
-        (hash >> 12 & 3)
-      );
-      // Macro undulation lowers abrupt cliff patterns between neighboring chunks.
-      int8_t macro = (int8_t)((hash >> 16) & 7) - 3;
-      height += macro;
-      // Add extra "micro-biome" variation without changing protocol biomes.
-      if (variant == 0) height += 4;         // Plateaus
-      else if (variant == 1 && height > 6) height -= 6; // Valleys
-      break;
-    }
-
-    case W_desert: {
-      height += 4 + (
-        (hash & 3) +
-        (hash >> 4 & 3)
-      );
-      if (variant == 2) height += 5; // Dunes
-      break;
-    }
-
-    case W_beach: {
-      // Start slightly below sea level to ensure it's all water
-      height = 62 - (
-        (hash & 3) +
-        (hash >> 4 & 3) +
-        (hash >> 8 & 3)
-      );
-      break;
-    }
-
-    case W_snowy_plains: {
-      // Use fewer components with larger ranges to create hills
-      height += (
-        (hash & 7) +
-        (hash >> 4 & 7)
-      );
-      if (variant == 3 && height > 8) height -= 8; // Frozen basins
-      break;
-    }
-
-    default: break;
+  // Valleys are broad and cohesive where continentalness is lower
+  // and erosion is higher (flattened/cut terrain).
+  float valley_mask = 0.0f;
+  float valley_continent_max = (float)WORLDGEN_VALLEY_CONTINENT_MAX / 100.0f;
+  float valley_erosion_min = (float)WORLDGEN_VALLEY_EROSION_MIN / 100.0f;
+  if (continental < valley_continent_max && erosion > valley_erosion_min) {
+    float c = (valley_continent_max - continental) / valley_continent_max;
+    float e = (erosion - valley_erosion_min) / (1.0f - valley_erosion_min);
+    valley_mask = c * e;
+    if (valley_mask > 1.0f) valley_mask = 1.0f;
+    valley_mask *= valley_mask;
   }
 
-  return height;
+  float mountain_t = 0.0f;
+  float mountain_continent_min = (float)WORLDGEN_MOUNTAIN_CONTINENT_MIN / 100.0f;
+  float mountain_erosion_max = (float)WORLDGEN_MOUNTAIN_EROSION_MAX / 100.0f;
+  if (continental > mountain_continent_min && erosion < mountain_erosion_max) {
+    float c = (continental - mountain_continent_min) / (1.0f - mountain_continent_min);
+    float e = (mountain_erosion_max - erosion) / mountain_erosion_max;
+    float r = ridge_folded;
+    mountain_t = c * e * r;
+    if (mountain_t > 1.0f) mountain_t = 1.0f;
+    mountain_t *= mountain_t;
+  }
 
+  float biome_base = 0.0f;
+  float biome_shape_scale = 1.0f;
+  switch (biome) {
+    case W_mangrove_swamp:
+      biome_base = -3.0f;
+      biome_shape_scale = 0.6f;
+      break;
+    case W_desert:
+      biome_base = 1.0f;
+      biome_shape_scale = 0.85f;
+      break;
+    case W_snowy_plains:
+      biome_base = 4.0f;
+      biome_shape_scale = 1.15f;
+      break;
+    case W_beach:
+      return 62;
+    case W_plains:
+    default:
+      biome_base = 0.0f;
+      biome_shape_scale = 1.0f;
+      break;
+  }
+
+  float height_f = (float)TERRAIN_BASE_HEIGHT + biome_base;
+  // Continentalness gives broad rises/sinks across long distances.
+  height_f += (continental - 0.5f) * 18.0f;
+  height_f += rolling * (float)WORLDGEN_ROLLING_AMPLITUDE * biome_shape_scale;
+  height_f += hills * (float)WORLDGEN_HILL_AMPLITUDE * biome_shape_scale;
+  height_f -= valley_mask * (float)WORLDGEN_VALLEY_DEPTH;
+
+  if (mountain_t > 0.0f) {
+    // Mountains are rare and chunk-spanning by design.
+    float mountain_gain = (0.35f + ridge_folded * 0.65f) * mountain_t * (float)WORLDGEN_MOUNTAIN_AMPLITUDE;
+    if (biome == W_snowy_plains) mountain_gain *= 1.15f;
+    if (biome == W_mangrove_swamp) mountain_gain *= 0.45f;
+    height_f += mountain_gain;
+  }
+
+  if (height_f < 48.0f) height_f = 48.0f;
+  float height_cap = (float)WORLDGEN_HEIGHT_CAP - 2.0f;
+  if (height_f > height_cap) height_f = height_cap;
+  return (uint8_t)(height_f + 0.5f);
 }
 
 uint8_t interpolate (uint8_t a, uint8_t b, uint8_t c, uint8_t d, int x, int z) {
@@ -233,14 +247,24 @@ uint8_t interpolate (uint8_t a, uint8_t b, uint8_t c, uint8_t d, int x, int z) {
 uint8_t getHeightAtFromAnchors (int rx, int rz, ChunkAnchor *anchor_ptr) {
 
   if (rx == 0 && rz == 0) {
-    int height = getCornerHeight(anchor_ptr[0].hash, anchor_ptr[0].biome);
+    int height = getCornerHeight(anchor_ptr[0].x, anchor_ptr[0].z, anchor_ptr[0].hash, anchor_ptr[0].biome);
     if (height > 67) return height - 1;
   }
   return interpolate(
-    getCornerHeight(anchor_ptr[0].hash, anchor_ptr[0].biome),
-    getCornerHeight(anchor_ptr[1].hash, anchor_ptr[1].biome),
-    getCornerHeight(anchor_ptr[16 / CHUNK_SIZE + 1].hash, anchor_ptr[16 / CHUNK_SIZE + 1].biome),
-    getCornerHeight(anchor_ptr[16 / CHUNK_SIZE + 2].hash, anchor_ptr[16 / CHUNK_SIZE + 2].biome),
+    getCornerHeight(anchor_ptr[0].x, anchor_ptr[0].z, anchor_ptr[0].hash, anchor_ptr[0].biome),
+    getCornerHeight(anchor_ptr[1].x, anchor_ptr[1].z, anchor_ptr[1].hash, anchor_ptr[1].biome),
+    getCornerHeight(
+      anchor_ptr[16 / CHUNK_SIZE + 1].x,
+      anchor_ptr[16 / CHUNK_SIZE + 1].z,
+      anchor_ptr[16 / CHUNK_SIZE + 1].hash,
+      anchor_ptr[16 / CHUNK_SIZE + 1].biome
+    ),
+    getCornerHeight(
+      anchor_ptr[16 / CHUNK_SIZE + 2].x,
+      anchor_ptr[16 / CHUNK_SIZE + 2].z,
+      anchor_ptr[16 / CHUNK_SIZE + 2].hash,
+      anchor_ptr[16 / CHUNK_SIZE + 2].biome
+    ),
     rx, rz
   );
 
@@ -249,14 +273,14 @@ uint8_t getHeightAtFromAnchors (int rx, int rz, ChunkAnchor *anchor_ptr) {
 uint8_t getHeightAtFromHash (int rx, int rz, int _x, int _z, uint32_t chunk_hash, uint8_t biome) {
 
   if (rx == 0 && rz == 0) {
-    int height = getCornerHeight(chunk_hash, biome);
+    int height = getCornerHeight(_x, _z, chunk_hash, biome);
     if (height > 67) return height - 1;
   }
   return interpolate(
-    getCornerHeight(chunk_hash, biome),
-    getCornerHeight(getChunkHash(_x + 1, _z), getChunkBiome(_x + 1, _z)),
-    getCornerHeight(getChunkHash(_x, _z + 1), getChunkBiome(_x, _z + 1)),
-    getCornerHeight(getChunkHash(_x + 1, _z + 1), getChunkBiome(_x + 1, _z + 1)),
+    getCornerHeight(_x, _z, chunk_hash, biome),
+    getCornerHeight(_x + 1, _z, getChunkHash(_x + 1, _z), getChunkBiome(_x + 1, _z)),
+    getCornerHeight(_x, _z + 1, getChunkHash(_x, _z + 1), getChunkBiome(_x, _z + 1)),
+    getCornerHeight(_x + 1, _z + 1, getChunkHash(_x + 1, _z + 1), getChunkBiome(_x + 1, _z + 1)),
     rx, rz
   );
 
@@ -367,6 +391,29 @@ uint8_t getTerrainAtFromCache (int x, int y, int z, int rx, int rz, ChunkAnchor 
       if (anchor.biome == W_plains && variant == 1) return B_dirt;
       return B_grass_block;
     }
+    if (y == height + 1 && height >= 64) {
+      // Surface decorator pass: add more life to the terrain without changing
+      // the base biome mapping. Deterministic per (x,z,seed).
+      uint8_t deco = (uint8_t)((getCoordinateHash(x, 0, z) >> 9) & 255);
+      if (anchor.biome == W_plains) {
+        if (deco < WORLDGEN_PLAINS_PUMPKIN_CHANCE) return B_pumpkin;
+        deco -= WORLDGEN_PLAINS_PUMPKIN_CHANCE;
+        if (deco < WORLDGEN_PLAINS_FLOWER_CHANCE) {
+          uint8_t flower = (uint8_t)((getCoordinateHash(x, 1, z) >> 5) & 3);
+          if (flower == 0) return B_dandelion;
+          if (flower == 1) return B_poppy;
+          return B_cornflower;
+        }
+        deco -= WORLDGEN_PLAINS_FLOWER_CHANCE;
+        if (deco < WORLDGEN_PLAINS_GRASS_CHANCE) return B_short_grass;
+      } else if (anchor.biome == W_desert) {
+        if (deco < WORLDGEN_DESERT_DEAD_BUSH_CHANCE) return B_dead_bush;
+      } else if (anchor.biome == W_snowy_plains) {
+        if (deco < WORLDGEN_SNOWY_GRASS_CHANCE) return B_short_grass;
+      } else if (anchor.biome == W_mangrove_swamp) {
+        if (deco < WORLDGEN_SWAMP_GRASS_CHANCE && y > 64) return B_short_grass;
+      }
+    }
     if (anchor.biome == W_snowy_plains && y == height + 1) {
       return B_snow;
     }
@@ -444,8 +491,11 @@ ChunkFeature getFeatureFromAnchor (ChunkAnchor anchor) {
   // Secondly, it reduces overall feature count. This is favorable
   // Everywhere except for swamps, which are otherwise very boring.
   if (anchor.biome != W_mangrove_swamp) {
-    if (feature.x < 3 || feature.x > CHUNK_SIZE - 3) skip_feature = true;
-    else if (feature.z < 3 || feature.z > CHUNK_SIZE - 3) skip_feature = true;
+    int margin = WORLDGEN_TREE_EDGE_MARGIN;
+    if (margin < 0) margin = 0;
+    if (margin >= CHUNK_SIZE) margin = CHUNK_SIZE - 1;
+    if (feature.x < margin || feature.x > CHUNK_SIZE - 1 - margin) skip_feature = true;
+    else if (feature.z < margin || feature.z > CHUNK_SIZE - 1 - margin) skip_feature = true;
   }
 
   if (skip_feature) {
@@ -467,7 +517,7 @@ ChunkFeature getFeatureFromAnchor (ChunkAnchor anchor) {
 
 uint8_t getTerrainAt (int x, int y, int z, ChunkAnchor anchor) {
 
-  if (y > 80) return B_air;
+  if (y > WORLDGEN_HEIGHT_CAP) return B_air;
 
   int rx = x % CHUNK_SIZE;
   int rz = z % CHUNK_SIZE;

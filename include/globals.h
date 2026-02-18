@@ -16,36 +16,56 @@
 #define false 0
 
 // TCP port, Minecraft's default is 25565
-#define PORT 25565
+#ifndef PORT
+  #define PORT 25565
+#endif
 
 // Player records kept in memory (not concurrent sessions).
 // Previously seen players still occupy slots while offline.
-#define MAX_PLAYERS 16
+#ifndef MAX_PLAYERS
+  #define MAX_PLAYERS 16
+#endif
 
 // How many mobs to allocate memory for
-#define MAX_MOBS (MAX_PLAYERS / 2)
+#ifndef MAX_MOBS
+  #define MAX_MOBS (MAX_PLAYERS / 2)
+#endif
 
 // Global cap for villager-like trading NPCs
-#define MAX_VILLAGERS 12
+#ifndef MAX_VILLAGERS
+  #define MAX_VILLAGERS 12
+#endif
 
 // Manhattan distance at which mobs despawn
-#define MOB_DESPAWN_DISTANCE 256
+#ifndef MOB_DESPAWN_DISTANCE
+  #define MOB_DESPAWN_DISTANCE 256
+#endif
 
 // Server game mode: 0 - survival; 1 - creative; 2 - adventure; 3 - spectator
-#define GAMEMODE 0
+#ifndef GAMEMODE
+  #define GAMEMODE 0
+#endif
 
 // Max render distance, determines how many chunks to send
-#define VIEW_DISTANCE 2
+#ifndef VIEW_DISTANCE
+  #define VIEW_DISTANCE 2
+#endif
 
 // Tick interval in microseconds (default 1s).
-#define TIME_BETWEEN_TICKS 1000000
+#ifndef TIME_BETWEEN_TICKS
+  #define TIME_BETWEEN_TICKS 1000000
+#endif
 
 // Average passive spawn chance for newly discovered chunks (1 / N)
-#define PASSIVE_SPAWN_CHANCE 6
+#ifndef PASSIVE_SPAWN_CHANCE
+  #define PASSIVE_SPAWN_CHANCE 6
+#endif
 
 // World-space offset of the lightweight "Nether zone".
 // This avoids full multi-dimension state while still allowing nether gameplay.
-#define NETHER_ZONE_OFFSET 16384
+#ifndef NETHER_ZONE_OFFSET
+  #define NETHER_ZONE_OFFSET 16384
+#endif
 
 // Protocol entity type IDs from 1.21.11 minecraft:entity_type registry.
 // Keep these centralized to avoid client-side model mismatches when Mojang
@@ -61,19 +81,29 @@
 #define TICKS_PER_SECOND ((float)1000000 / TIME_BETWEEN_TICKS)
 
 // Initial terrain/biome seed, hashed at startup.
-#define INITIAL_WORLD_SEED 0xA103DE6C
+#ifndef INITIAL_WORLD_SEED
+  #define INITIAL_WORLD_SEED 0xA103DE6C
+#endif
 
 // Initial gameplay RNG seed, hashed at startup.
-#define INITIAL_RNG_SEED 0xE2B9419
+#ifndef INITIAL_RNG_SEED
+  #define INITIAL_RNG_SEED 0xE2B9419
+#endif
 
 // Size of each interpolated terrain area; prefer powers of two.
-#define CHUNK_SIZE 8
+#ifndef CHUNK_SIZE
+  #define CHUNK_SIZE 8
+#endif
 
 // Baseline terrain elevation.
-#define TERRAIN_BASE_HEIGHT 60
+#ifndef TERRAIN_BASE_HEIGHT
+  #define TERRAIN_BASE_HEIGHT 60
+#endif
 
 // Cave generation Y level
-#define CAVE_BASE_DEPTH 24
+#ifndef CAVE_BASE_DEPTH
+  #define CAVE_BASE_DEPTH 24
+#endif
 
 // Biome span in multiples of CHUNK_SIZE; prefer powers of two.
 #define BIOME_SIZE (CHUNK_SIZE * 8)
@@ -84,10 +114,80 @@
 // Per-player recently visited chunk history.
 // Chunks in this window are not re-sent on movement updates.
 // Must be at least 1.
-#define VISITED_HISTORY 4
+#ifndef VISITED_HISTORY
+  #define VISITED_HISTORY 4
+#endif
 
 // Maximum persisted player block changes.
-#define MAX_BLOCK_CHANGES 20000
+#ifndef MAX_BLOCK_CHANGES
+  #define MAX_BLOCK_CHANGES 20000
+#endif
+
+// World decoration tuning (overridable via -D... build flags).
+// Values are probabilities in [0..255] for per-column decorators.
+#ifndef WORLDGEN_TREE_EDGE_MARGIN
+  #define WORLDGEN_TREE_EDGE_MARGIN 1
+#endif
+#ifndef WORLDGEN_PLAINS_GRASS_CHANCE
+  #define WORLDGEN_PLAINS_GRASS_CHANCE 72
+#endif
+#ifndef WORLDGEN_PLAINS_FLOWER_CHANCE
+  #define WORLDGEN_PLAINS_FLOWER_CHANCE 18
+#endif
+#ifndef WORLDGEN_PLAINS_PUMPKIN_CHANCE
+  #define WORLDGEN_PLAINS_PUMPKIN_CHANCE 2
+#endif
+#ifndef WORLDGEN_DESERT_DEAD_BUSH_CHANCE
+  #define WORLDGEN_DESERT_DEAD_BUSH_CHANCE 20
+#endif
+#ifndef WORLDGEN_SNOWY_GRASS_CHANCE
+  #define WORLDGEN_SNOWY_GRASS_CHANCE 28
+#endif
+#ifndef WORLDGEN_SWAMP_GRASS_CHANCE
+  #define WORLDGEN_SWAMP_GRASS_CHANCE 40
+#endif
+
+// Terrain shape tuning (overridable via -D... build flags).
+// Values define amplitude/rarity for coherent macro terrain.
+#ifndef WORLDGEN_HEIGHT_CAP
+  #define WORLDGEN_HEIGHT_CAP 160
+#endif
+#ifndef WORLDGEN_ROLLING_AMPLITUDE
+  #define WORLDGEN_ROLLING_AMPLITUDE 8
+#endif
+#ifndef WORLDGEN_HILL_AMPLITUDE
+  #define WORLDGEN_HILL_AMPLITUDE 7
+#endif
+#ifndef WORLDGEN_VALLEY_DEPTH
+  #define WORLDGEN_VALLEY_DEPTH 12
+#endif
+#ifndef WORLDGEN_MOUNTAIN_AMPLITUDE
+  #define WORLDGEN_MOUNTAIN_AMPLITUDE 34
+#endif
+#ifndef WORLDGEN_MOUNTAIN_THRESHOLD
+  #define WORLDGEN_MOUNTAIN_THRESHOLD 74
+#endif
+#ifndef WORLDGEN_CONTINENT_SCALE
+  #define WORLDGEN_CONTINENT_SCALE 64
+#endif
+#ifndef WORLDGEN_EROSION_SCALE
+  #define WORLDGEN_EROSION_SCALE 64
+#endif
+#ifndef WORLDGEN_RIDGE_SCALE
+  #define WORLDGEN_RIDGE_SCALE 16
+#endif
+#ifndef WORLDGEN_MOUNTAIN_CONTINENT_MIN
+  #define WORLDGEN_MOUNTAIN_CONTINENT_MIN 60
+#endif
+#ifndef WORLDGEN_MOUNTAIN_EROSION_MAX
+  #define WORLDGEN_MOUNTAIN_EROSION_MAX 50
+#endif
+#ifndef WORLDGEN_VALLEY_CONTINENT_MAX
+  #define WORLDGEN_VALLEY_CONTINENT_MAX 48
+#endif
+#ifndef WORLDGEN_VALLEY_EROSION_MIN
+  #define WORLDGEN_VALLEY_EROSION_MIN 58
+#endif
 
 // Enables synchronous world persistence to disk/flash.
 // Runtime state stays in memory; disk is read on startup and written on updates.

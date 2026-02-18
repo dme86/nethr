@@ -2,6 +2,9 @@
 
 SHELL := /bin/bash
 CC ?= gcc
+CFLAGS ?= -O2
+CPPFLAGS ?= -Iinclude
+EXTRA_CPPFLAGS ?=
 
 MC_VERSION ?= 1.21.11
 SERVER_JAR ?= notchian/server.jar
@@ -29,7 +32,7 @@ asdf-install: ## Install missing asdf plugins and pinned tool versions from .too
 	@./scripts/asdf-bootstrap.sh --install
 
 lint: ## Run compile-time lint checks for critical C issues.
-	@$(CC) src/*.c -Iinclude $(LINT_CFLAGS)
+	@$(CC) src/*.c $(CPPFLAGS) $(EXTRA_CPPFLAGS) $(LINT_CFLAGS)
 	@echo "Lint passed"
 
 doctor: tools-check lint ## Run project health checks (toolchain + lint).
@@ -49,7 +52,7 @@ registries: download-jar ## Generate include/registries.h and src/registries.c.
 	@PATH="$(abspath .deps/jdk/Contents/Home/bin):$(abspath .deps/node/bin):$$PATH" SERVER_JAR="$(notdir $(SERVER_JAR))" ./extract_registries.sh
 
 build: include/registries.h src/registries.c ## Build nethr binary.
-	@$(CC) src/*.c -O2 -Iinclude -o nethr
+	@$(CC) src/*.c $(CPPFLAGS) $(EXTRA_CPPFLAGS) $(CFLAGS) -o nethr
 	@echo "Built ./nethr"
 
 run: build ## Run server binary.
