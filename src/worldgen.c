@@ -300,6 +300,10 @@ uint8_t getCornerHeight (short anchor_x, short anchor_z, uint32_t hash, uint8_t 
   float hills = valueNoise2D(anchor_x, anchor_z, 10, 0x4C8A7D13F20B5E91ULL) - 0.5f;
   float cliff_noise = valueNoise2D(anchor_x, anchor_z, 6, 0x7E3B19AC40D25F91ULL) - 0.5f;
   float peak_noise = valueNoise2D(anchor_x, anchor_z, 28, 0x5F91D2A34C7B18E6ULL);
+  float chain_axis = valueNoise2D(anchor_x, anchor_z, 56, 0x3DA9F40B6E2187C5ULL) * 2.0f - 1.0f;
+  float chain_presence = valueNoise2D(anchor_x, anchor_z, 104, 0x1F7C8B24D65EA903ULL);
+  float river_primary = valueNoise2D(anchor_x, anchor_z, 36, 0xF13A5B9C6D7E8A01ULL) * 2.0f - 1.0f;
+  float river_secondary = valueNoise2D(anchor_x, anchor_z, 14, 0x29CE4AB1D70685F3ULL) * 2.0f - 1.0f;
 
   // Broad valleys for high erosion and low-mid continentalness.
   float valley_mask = 0.0f;
@@ -376,6 +380,22 @@ uint8_t getCornerHeight (short anchor_x, short anchor_z, uint32_t hash, uint8_t 
     height_f += mountain_gain;
   }
 
+  // Long mountain chains: form ridges along coherent noise axes.
+  float chain_axis_abs = chain_axis < 0.0f ? -chain_axis : chain_axis;
+  float chain_line = 1.0f - chain_axis_abs;
+  float chain_t = (chain_line - 0.62f) / 0.38f;
+  if (chain_t < 0.0f) chain_t = 0.0f;
+  if (chain_t > 1.0f) chain_t = 1.0f;
+  float chain_presence_t = (chain_presence - 0.45f) / 0.55f;
+  if (chain_presence_t < 0.0f) chain_presence_t = 0.0f;
+  if (chain_presence_t > 1.0f) chain_presence_t = 1.0f;
+  if (continental > 0.08f && erosion < 0.18f) {
+    float chain_gain = chain_t * chain_presence_t * (6.0f + 24.0f * ridge_folded);
+    if (biome == W_snowy_plains) chain_gain *= 1.18f;
+    if (biome == W_mangrove_swamp) chain_gain *= 0.50f;
+    height_f += chain_gain;
+  }
+
   // Rare high peaks in cold/highland contexts.
   if (continental > 0.35f && erosion < -0.20f && ridge_folded > 0.70f && peak_noise > 0.70f) {
     float peak_t = (peak_noise - 0.70f) / 0.30f;
@@ -393,6 +413,26 @@ uint8_t getCornerHeight (short anchor_x, short anchor_z, uint32_t hash, uint8_t 
     if (cliff_t > 1.0f) cliff_t = 1.0f;
     float cliff_gain = (cliff_noise > 0.12f) ? (cliff_noise - 0.12f) * 20.0f * cliff_t : 0.0f;
     height_f += cliff_gain;
+  }
+
+  // River valleys: coherent channel mask + wider bank cut, not just a thin line.
+  float river_abs0 = river_primary < 0.0f ? -river_primary : river_primary;
+  float river_abs1 = river_secondary < 0.0f ? -river_secondary : river_secondary;
+  float river_shape = river_abs0 * 0.72f + river_abs1 * 0.28f;
+  if (continental > -0.10f && continental < 0.62f) {
+    float river_core = (0.080f - river_shape) / 0.080f;
+    if (river_core < 0.0f) river_core = 0.0f;
+    if (river_core > 1.0f) river_core = 1.0f;
+    float river_bank = (0.145f - river_shape) / 0.145f;
+    if (river_bank < 0.0f) river_bank = 0.0f;
+    if (river_bank > 1.0f) river_bank = 1.0f;
+    float inland_t = (continental + 0.10f) / 0.72f;
+    if (inland_t < 0.0f) inland_t = 0.0f;
+    if (inland_t > 1.0f) inland_t = 1.0f;
+    float carve_depth = river_core * (8.0f + 14.0f * inland_t);
+    float bank_depth = river_bank * 3.0f;
+    height_f -= carve_depth;
+    height_f -= bank_depth;
   }
 
   if (height_f < 48.0f) height_f = 48.0f;
