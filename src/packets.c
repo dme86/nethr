@@ -68,11 +68,10 @@ static void initSkyLightBuffers () {
 
 static uint8_t templateChunksEnabled () {
   if (template_chunks_enabled_cached != -1) return (uint8_t)template_chunks_enabled_cached;
-  const char *env = getenv("NETHR_DISABLE_TEMPLATE_CHUNKS");
-  if (env != NULL && env[0] == '1') template_chunks_enabled_cached = false;
-  else template_chunks_enabled_cached = true;
+  const char *enable_env = getenv("NETHR_ENABLE_TEMPLATE_CHUNKS");
+  template_chunks_enabled_cached = (enable_env != NULL && enable_env[0] == '1');
   if (!template_chunks_enabled_cached) {
-    printf("Template chunks disabled by env NETHR_DISABLE_TEMPLATE_CHUNKS=1; using procedural encoder\n\n");
+    printf("Template chunks disabled by default; using procedural encoder (set NETHR_ENABLE_TEMPLATE_CHUNKS=1 to enable templates)\n\n");
   }
   return (uint8_t)template_chunks_enabled_cached;
 }

@@ -43,8 +43,8 @@
 
 static uint8_t templateChunkCompatActive () {
   #ifdef CHUNK_TEMPLATE_VISIBILITY_COMPAT
-    const char *env = getenv("NETHR_DISABLE_TEMPLATE_CHUNKS");
-    return !(env != NULL && env[0] == '1');
+    const char *enable_env = getenv("NETHR_ENABLE_TEMPLATE_CHUNKS");
+    return (enable_env != NULL && enable_env[0] == '1');
   #else
     return false;
   #endif

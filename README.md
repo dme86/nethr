@@ -36,6 +36,8 @@ Registry data must be generated from an official Minecraft server JAR before com
 ### Makefile workflow (recommended)
 - `make all` downloads `server.jar` if missing, generates registries, and builds.
 - `make build` builds using existing generated registries.
+- Build-time overrides are supported via `EXTRA_CPPFLAGS`:
+  - Example: `make build EXTRA_CPPFLAGS="-DMAX_PLAYERS=32 -DMAX_MOBS=24 -DVIEW_DISTANCE=3"`
 - `make lint` runs compile-time lint checks for critical C issues.
 - `make doctor` runs toolchain + lint checks.
 - `make clean` removes build outputs and generated registry artifacts.
@@ -58,12 +60,14 @@ Common tuning options:
 - Movement broadcast load: disable `BROADCAST_ALL_MOVEMENT` and/or `SCALE_MOVEMENT_UPDATES_TO_PLAYER_COUNT` if network overhead is high.
 - Stability toggles: disable `ALLOW_CHESTS` or `DO_FLUID_FLOW` if needed on weaker hardware.
 - Chunk revisit behavior: increase `VISITED_HISTORY` to reduce repeated regeneration under constrained conditions.
+- World density can be tuned at build time, e.g.:
+  - `make build EXTRA_CPPFLAGS="-DWORLDGEN_PLAINS_GRASS_CHANCE=96 -DWORLDGEN_PLAINS_FLOWER_CHANCE=28 -DWORLDGEN_TREE_EDGE_MARGIN=0"`
+  - `make build EXTRA_CPPFLAGS="-DMAX_PLAYERS=32 -DMAX_MOBS=24 -DPASSIVE_SPAWN_CHANCE=4"`
 
 Runtime chunk pipeline:
-- Default: use Notchian-captured chunk templates (`assets/chunks/chunk_template_XX.bin`) when present.
-- Procedural fallback: built-in chunk encoder is used when templates are unavailable.
-- Force procedural mode explicitly:
-  - `NETHR_DISABLE_TEMPLATE_CHUNKS=1 make run`
+- Default: use procedural chunk generation (better biome continuity, less repetition).
+- Optional template mode: use Notchian-captured templates for compatibility testing.
+  - `NETHR_ENABLE_TEMPLATE_CHUNKS=1 make run`
 
 ## Admin System Chat Pipe (Linux)
 On Linux builds, nethr creates:
@@ -117,5 +121,5 @@ Development-only fallback:
    - `REFRESH_TEMPLATES=1 make world-regen`
 4. Validate procedural chunk path:
    - `make world-regen`
-   - `NETHR_DISABLE_TEMPLATE_CHUNKS=1 make run`
+   - `make run`
    - Check for `Chunk encoder v8` in server logs.
