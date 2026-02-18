@@ -1189,23 +1189,27 @@ int sc_chunkDataAndUpdateLight (int client_fd, int _x, int _z) {
   // Omit block entities.
   body_off = appendVarInt(body, body_off, 0);
 
-  // Light data isolation mode:
-  // keep packet structurally minimal and empty to verify the remaining
-  // chunk body is decoded correctly by vanilla 1.21.11.
-  // TODO(protocol/light): Neighbor chunks appear dark for the client with this
-  // empty light payload. Replace this with notchian-consistent skylight masks
-  // and update arrays once chunk-body decode is fully stabilized.
-  body_off = appendVarInt(body, body_off, 0); // sky_y_mask
-  body_off = appendVarInt(body, body_off, 0); // block_y_mask
-  body_off = appendVarInt(body, body_off, 0); // empty_sky_y_mask
-  body_off = appendVarInt(body, body_off, 0); // empty_block_y_mask
-  body_off = appendVarInt(body, body_off, 0); // sky_updates
+  // Light data for minY=-64,height=384:
+  // section count is 24 and light uses section+2 => 26 layers.
+  const uint64_t sky_full_mask = 0x03FFFFFFULL; // 26 one-bits
+  const uint32_t sky_updates = 26;
+  body_off = appendVarInt(body, body_off, 1); // sky_y_mask long count
+  body_off = appendUint64BE(body, body_off, sky_full_mask);
+  body_off = appendVarInt(body, body_off, 0); // block_y_mask long count
+  body_off = appendVarInt(body, body_off, 0); // empty_sky_y_mask long count
+  body_off = appendVarInt(body, body_off, 0); // empty_block_y_mask long count
+  body_off = appendVarInt(body, body_off, sky_updates);
+  for (uint32_t i = 0; i < sky_updates; i ++) {
+    body_off = appendVarInt(body, body_off, 2048);
+    memcpy(body + body_off, sky_light_full, 2048);
+    body_off += 2048;
+  }
   body_off = appendVarInt(body, body_off, 0); // block_updates
 
   static uint8_t logged_once = false;
   if (!logged_once) {
     printf(
-      "Chunk encoder v8: packet_id=0x2C body_len=%zu chunk_data_len=%zu light_mode=empty sections=%d y=[%d..%d] (procedural)\n\n",
+      "Chunk encoder v8: packet_id=0x2C body_len=%zu chunk_data_len=%zu light_mode=sky_full26 sections=%d y=[%d..%d] (procedural)\n\n",
       body_off, chunk_data_off, section_count, section_base_y, section_base_y + section_count * 16 - 1
     );
     logged_once = true;
