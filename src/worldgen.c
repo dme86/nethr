@@ -113,6 +113,28 @@ static uint32_t getCoordinateHash (int x, int y, int z) {
   return splitmix64(h ^ (uint32_t)z);
 }
 
+static uint8_t isWaterfallSpringCandidate (int x, int z, uint8_t height, uint8_t biome) {
+  if (biome == W_desert || biome == W_beach) return false;
+  if (height < 76) return false;
+
+  float moisture = fractalNoise2D(x, z, 0x4A7C159E1D2B3F67ULL);
+  float spring = valueNoise2D(x, z, 20, 0xC7134E9A2B5D8F01ULL);
+  if (moisture < 0.52f || spring < 0.82f) return false;
+
+  // Require a local steep edge so springs look like cliff waterfalls.
+  int h_n = getHeightAt(x, z - 1);
+  int h_s = getHeightAt(x, z + 1);
+  int h_w = getHeightAt(x - 1, z);
+  int h_e = getHeightAt(x + 1, z);
+  int h_min = h_n;
+  if (h_s < h_min) h_min = h_s;
+  if (h_w < h_min) h_min = h_w;
+  if (h_e < h_min) h_min = h_e;
+  if ((int)height - h_min < 6) return false;
+
+  return true;
+}
+
 uint32_t getChunkHash (short x, short z) {
 
   uint8_t buf[8];
@@ -269,6 +291,8 @@ uint8_t getCornerHeight (short anchor_x, short anchor_z, uint32_t hash, uint8_t 
   // Secondary local relief so plains are not flat carpets.
   float rolling = fractalNoise2D(anchor_x, anchor_z, 0x11E96B3AA7E5B74DULL) - 0.5f;
   float hills = valueNoise2D(anchor_x, anchor_z, 10, 0x4C8A7D13F20B5E91ULL) - 0.5f;
+  float cliff_noise = valueNoise2D(anchor_x, anchor_z, 6, 0x7E3B19AC40D25F91ULL) - 0.5f;
+  float peak_noise = valueNoise2D(anchor_x, anchor_z, 28, 0x5F91D2A34C7B18E6ULL);
 
   // Broad valleys for high erosion and low-mid continentalness.
   float valley_mask = 0.0f;
@@ -343,6 +367,25 @@ uint8_t getCornerHeight (short anchor_x, short anchor_z, uint32_t hash, uint8_t 
     if (biome == W_snowy_plains) mountain_gain *= 1.15f;
     if (biome == W_mangrove_swamp) mountain_gain *= 0.45f;
     height_f += mountain_gain;
+  }
+
+  // Rare high peaks in cold/highland contexts.
+  if (continental > 0.35f && erosion < -0.20f && ridge_folded > 0.70f && peak_noise > 0.70f) {
+    float peak_t = (peak_noise - 0.70f) / 0.30f;
+    if (peak_t > 1.0f) peak_t = 1.0f;
+    peak_t *= peak_t;
+    float peak_gain = 10.0f + 22.0f * peak_t;
+    if (biome == W_snowy_plains) peak_gain *= 1.2f;
+    if (biome == W_mangrove_swamp) peak_gain *= 0.45f;
+    height_f += peak_gain;
+  }
+
+  // Cliff sharpening around ridge zones for more dramatic transitions.
+  if (ridge_folded > 0.62f && erosion < 0.15f) {
+    float cliff_t = (ridge_folded - 0.62f) / 0.38f;
+    if (cliff_t > 1.0f) cliff_t = 1.0f;
+    float cliff_gain = (cliff_noise > 0.12f) ? (cliff_noise - 0.12f) * 20.0f * cliff_t : 0.0f;
+    height_f += cliff_gain;
   }
 
   if (height_f < 48.0f) height_f = 48.0f;
@@ -507,6 +550,7 @@ uint8_t getTerrainAtFromCache (int x, int y, int z, int rx, int rz, ChunkAnchor 
       return getSurfaceBlockForBiome(anchor.biome, variant, height);
     }
     if (y == height + 1 && height >= 64) {
+      if (isWaterfallSpringCandidate(x, z, height, anchor.biome)) return B_water;
       // Surface decorator pass: deterministic biome-specific patches/clusters.
       uint8_t deco = (uint8_t)((getCoordinateHash(x, 0, z) >> 9) & 255);
       uint8_t surface = getSurfaceBlockForBiome(anchor.biome, variant, height);
