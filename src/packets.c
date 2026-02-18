@@ -65,9 +65,23 @@ static void initSkyLightBuffers () {
   sky_light_buffers_initialized = true;
 }
 
-static uint8_t *chunk_template_0x2c = NULL;
-static size_t chunk_template_0x2c_len = 0;
-static uint8_t chunk_template_0x2c_loaded = false;
+#define CHUNK_TEMPLATE_POOL_MAX 64
+
+// Template pool for compatibility mode: we replay known-good Notchian
+// level_chunk_with_light packets and patch only chunk x/z coordinates.
+static uint8_t *chunk_template_0x2c_pool[CHUNK_TEMPLATE_POOL_MAX];
+static size_t chunk_template_0x2c_pool_len[CHUNK_TEMPLATE_POOL_MAX];
+static int32_t chunk_template_0x2c_src_x[CHUNK_TEMPLATE_POOL_MAX];
+static int32_t chunk_template_0x2c_src_z[CHUNK_TEMPLATE_POOL_MAX];
+static int chunk_template_0x2c_pool_count = 0;
+static uint8_t chunk_template_0x2c_pool_loaded = false;
+static int32_t chunk_template_grid_min_x = 0;
+static int32_t chunk_template_grid_max_x = 0;
+static int32_t chunk_template_grid_min_z = 0;
+static int32_t chunk_template_grid_max_z = 0;
+static int chunk_template_grid_width = 0;
+static int chunk_template_grid_height = 0;
+static uint8_t chunk_template_grid_complete = false;
 
 static void writeInt32BE (uint8_t *buf, int32_t v) {
   uint32_t u = (uint32_t)v;
@@ -77,50 +91,111 @@ static void writeInt32BE (uint8_t *buf, int32_t v) {
   buf[3] = (uint8_t)(u & 0xFF);
 }
 
-static void tryLoadChunkTemplate0x2c () {
-  if (chunk_template_0x2c_loaded) return;
-  chunk_template_0x2c_loaded = true;
+static int32_t readInt32BE (const uint8_t *buf) {
+  uint32_t u =
+    ((uint32_t)buf[0] << 24) |
+    ((uint32_t)buf[1] << 16) |
+    ((uint32_t)buf[2] << 8) |
+    (uint32_t)buf[3];
+  return (int32_t)u;
+}
 
-  const char *path = "assets/chunk_template_1.21.11_0x2c.bin";
-  FILE *fp = fopen(path, "rb");
-  if (fp == NULL) {
-    printf("Chunk template unavailable at %s; using built-in encoder\n\n", path);
-    return;
-  }
+static int positiveMod (int value, int mod) {
+  // Modulo that behaves consistently for negative world coordinates.
+  int r = value % mod;
+  return r < 0 ? r + mod : r;
+}
 
-  if (fseek(fp, 0, SEEK_END) != 0) {
+static void tryLoadChunkTemplate0x2cPool () {
+  if (chunk_template_0x2c_pool_loaded) return;
+  chunk_template_0x2c_pool_loaded = true;
+
+  // Load chunk_template_00.bin, chunk_template_01.bin, ... until a file
+  // is missing. This keeps template management trivial.
+  for (int i = 0; i < CHUNK_TEMPLATE_POOL_MAX; i ++) {
+    char path[96];
+    snprintf(path, sizeof(path), "assets/chunks/chunk_template_%02d.bin", i);
+    FILE *fp = fopen(path, "rb");
+    if (fp == NULL) break;
+
+    if (fseek(fp, 0, SEEK_END) != 0) {
+      fclose(fp);
+      continue;
+    }
+    long size = ftell(fp);
+    if (size <= 0 || size > 1 << 20) {
+      fclose(fp);
+      continue;
+    }
+    rewind(fp);
+
+    uint8_t *buf = malloc((size_t)size);
+    if (buf == NULL) {
+      fclose(fp);
+      continue;
+    }
+    size_t read_n = fread(buf, 1, (size_t)size, fp);
     fclose(fp);
-    return;
-  }
-  long size = ftell(fp);
-  if (size <= 0 || size > 1 << 20) {
-    fclose(fp);
-    return;
-  }
-  rewind(fp);
+    if (read_n != (size_t)size || buf[0] != 0x2C || size < 9) {
+      free(buf);
+      continue;
+    }
 
-  chunk_template_0x2c = malloc((size_t)size);
-  if (chunk_template_0x2c == NULL) {
-    fclose(fp);
-    return;
+    int idx = chunk_template_0x2c_pool_count;
+    chunk_template_0x2c_pool[idx] = buf;
+    chunk_template_0x2c_pool_len[idx] = (size_t)size;
+    chunk_template_0x2c_src_x[idx] = readInt32BE(buf + 1);
+    chunk_template_0x2c_src_z[idx] = readInt32BE(buf + 5);
+    chunk_template_0x2c_pool_count ++;
   }
-  size_t read_n = fread(chunk_template_0x2c, 1, (size_t)size, fp);
-  fclose(fp);
-  if (read_n != (size_t)size) {
-    free(chunk_template_0x2c);
-    chunk_template_0x2c = NULL;
-    return;
-  }
-  if (chunk_template_0x2c[0] != 0x2C || size < 9) {
-    free(chunk_template_0x2c);
-    chunk_template_0x2c = NULL;
+
+  if (chunk_template_0x2c_pool_count == 0) {
+    printf("Chunk template pool unavailable at assets/chunks; using built-in encoder\n\n");
     return;
   }
 
-  chunk_template_0x2c_len = (size_t)size;
+  // Detect whether templates form a complete rectangular source grid.
+  // If true we can preserve neighbor continuity when remapping chunks.
+  chunk_template_grid_min_x = chunk_template_grid_max_x = chunk_template_0x2c_src_x[0];
+  chunk_template_grid_min_z = chunk_template_grid_max_z = chunk_template_0x2c_src_z[0];
+  for (int i = 1; i < chunk_template_0x2c_pool_count; i ++) {
+    if (chunk_template_0x2c_src_x[i] < chunk_template_grid_min_x) chunk_template_grid_min_x = chunk_template_0x2c_src_x[i];
+    if (chunk_template_0x2c_src_x[i] > chunk_template_grid_max_x) chunk_template_grid_max_x = chunk_template_0x2c_src_x[i];
+    if (chunk_template_0x2c_src_z[i] < chunk_template_grid_min_z) chunk_template_grid_min_z = chunk_template_0x2c_src_z[i];
+    if (chunk_template_0x2c_src_z[i] > chunk_template_grid_max_z) chunk_template_grid_max_z = chunk_template_0x2c_src_z[i];
+  }
+  chunk_template_grid_width = chunk_template_grid_max_x - chunk_template_grid_min_x + 1;
+  chunk_template_grid_height = chunk_template_grid_max_z - chunk_template_grid_min_z + 1;
+  chunk_template_grid_complete = false;
+  if (chunk_template_grid_width > 0 && chunk_template_grid_height > 0 &&
+    chunk_template_grid_width * chunk_template_grid_height == chunk_template_0x2c_pool_count
+  ) {
+    chunk_template_grid_complete = true;
+    for (int z = chunk_template_grid_min_z; z <= chunk_template_grid_max_z; z ++) {
+      for (int x = chunk_template_grid_min_x; x <= chunk_template_grid_max_x; x ++) {
+        uint8_t found = false;
+        for (int i = 0; i < chunk_template_0x2c_pool_count; i ++) {
+          if (chunk_template_0x2c_src_x[i] == x && chunk_template_0x2c_src_z[i] == z) {
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          chunk_template_grid_complete = false;
+          break;
+        }
+      }
+      if (!chunk_template_grid_complete) break;
+    }
+  }
+
+  printf("Loaded notchian chunk template pool (0x2C): %d templates\n", chunk_template_0x2c_pool_count);
   printf(
-    "Loaded notchian chunk template (0x2C), body_len=%zu from %s\n\n",
-    chunk_template_0x2c_len, path
+    "  Source span: x=[%d..%d] z=[%d..%d], grid=%dx%d, complete=%s\n\n",
+    chunk_template_grid_min_x, chunk_template_grid_max_x,
+    chunk_template_grid_min_z, chunk_template_grid_max_z,
+    chunk_template_grid_width, chunk_template_grid_height,
+    chunk_template_grid_complete ? "yes" : "no"
   );
 }
 
@@ -766,11 +841,33 @@ int sc_setCenterChunk (int client_fd, int x, int y) {
 
 // S->C Chunk Data and Update Light
 int sc_chunkDataAndUpdateLight (int client_fd, int _x, int _z) {
-  tryLoadChunkTemplate0x2c();
-  if (chunk_template_0x2c != NULL) {
-    uint8_t *body = malloc(chunk_template_0x2c_len);
+  tryLoadChunkTemplate0x2cPool();
+  if (chunk_template_0x2c_pool_count > 0) {
+    int template_index = -1;
+    if (chunk_template_grid_complete) {
+      // Map server world chunks to the captured source-template grid.
+      // This keeps adjacent chunks visually coherent instead of random.
+      int mapped_x = chunk_template_grid_min_x +
+        positiveMod(_x - chunk_template_grid_min_x, chunk_template_grid_width);
+      int mapped_z = chunk_template_grid_min_z +
+        positiveMod(_z - chunk_template_grid_min_z, chunk_template_grid_height);
+      for (int i = 0; i < chunk_template_0x2c_pool_count; i ++) {
+        if (chunk_template_0x2c_src_x[i] == mapped_x && chunk_template_0x2c_src_z[i] == mapped_z) {
+          template_index = i;
+          break;
+        }
+      }
+    }
+    if (template_index == -1) {
+      // Fallback path when we don't have a complete grid: deterministic hash.
+      uint32_t hx = (uint32_t)_x * 73856093u;
+      uint32_t hz = (uint32_t)_z * 19349663u;
+      template_index = (int)((hx ^ hz) % (uint32_t)chunk_template_0x2c_pool_count);
+    }
+    size_t body_len = chunk_template_0x2c_pool_len[template_index];
+    uint8_t *body = malloc(body_len);
     if (body == NULL) return 1;
-    memcpy(body, chunk_template_0x2c, chunk_template_0x2c_len);
+    memcpy(body, chunk_template_0x2c_pool[template_index], body_len);
     // Packet body layout starts with: id(0x2C), chunk_x(i32), chunk_z(i32)
     writeInt32BE(body + 1, _x);
     writeInt32BE(body + 5, _z);
@@ -778,14 +875,14 @@ int sc_chunkDataAndUpdateLight (int client_fd, int _x, int _z) {
     static uint8_t logged_once = false;
     if (!logged_once) {
       printf(
-        "Chunk encoder v6: using notchian 0x2C template, body_len=%zu\n\n",
-        chunk_template_0x2c_len
+        "Chunk encoder v7: using notchian 0x2C template pool (%d variants), grid_complete=%s, sample_body_len=%zu\n\n",
+        chunk_template_0x2c_pool_count, chunk_template_grid_complete ? "yes" : "no", body_len
       );
       logged_once = true;
     }
 
-    writeVarInt(client_fd, (uint32_t)chunk_template_0x2c_len);
-    send_all(client_fd, body, (ssize_t)chunk_template_0x2c_len);
+    writeVarInt(client_fd, (uint32_t)body_len);
+    send_all(client_fd, body, (ssize_t)body_len);
     free(body);
     return 0;
   }
@@ -1362,18 +1459,21 @@ int sc_spawnEntity (
   writeDouble(client_fd, y);
   writeDouble(client_fd, z);
 
+  // 1.21.11 layout matches Notchian order:
+  // position -> velocity -> rotations -> data (VarInt).
+  // Previous order caused decoder "bytes extra" on add_entity.
+  // Velocity (delta movement)
+  writeUint16(client_fd, 0);
+  writeUint16(client_fd, 0);
+  writeUint16(client_fd, 0);
+
   // Angles
   writeByte(client_fd, pitch);
   writeByte(client_fd, yaw);
   writeByte(client_fd, yaw);
 
-  // Data - mostly unused
-  writeByte(client_fd, 0);
-
-  // Velocity
-  writeUint16(client_fd, 0);
-  writeUint16(client_fd, 0);
-  writeUint16(client_fd, 0);
+  // Data (VarInt, mostly unused)
+  writeVarInt(client_fd, 0);
 
   return 0;
 }

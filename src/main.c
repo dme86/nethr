@@ -212,22 +212,26 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
           sc_spawnEntityPlayer(client_fd, player_data[i]);
         }
 
-        // Spawn currently allocated mobs for this client.
-        uint8_t uuid[16];
-        uint32_t r = fast_rand();
-        memcpy(uuid, &r, 4);
-        // Reuse mob index as stable UUID suffix.
-        for (int i = 0; i < MAX_MOBS; i ++) {
-          if (mob_data[i].type == 0) continue;
-          if ((mob_data[i].data & 31) == 0) continue;
-          memcpy(uuid + 4, &i, 4);
-          sc_spawnEntity(
-            client_fd, -2 - i, uuid,
-            mob_data[i].type, mob_data[i].x, mob_data[i].y, mob_data[i].z,
-            0, 0
-          );
-          broadcastMobMetadata(client_fd, -2 - i);
-        }
+        #ifndef CHUNK_TEMPLATE_VISIBILITY_COMPAT
+          // In template-compat mode we suppress mob entity traffic because
+          // add_entity for all mob variants is still being stabilized.
+          // Spawn currently allocated mobs for this client.
+          uint8_t uuid[16];
+          uint32_t r = fast_rand();
+          memcpy(uuid, &r, 4);
+          // Reuse mob index as stable UUID suffix.
+          for (int i = 0; i < MAX_MOBS; i ++) {
+            if (mob_data[i].type == 0) continue;
+            if ((mob_data[i].data & 31) == 0) continue;
+            memcpy(uuid + 4, &i, 4);
+            sc_spawnEntity(
+              client_fd, -2 - i, uuid,
+              mob_data[i].type, mob_data[i].x, mob_data[i].y, mob_data[i].z,
+              0, 0
+            );
+            broadcastMobMetadata(client_fd, -2 - i);
+          }
+        #endif
 
       }
       break;
@@ -411,52 +415,57 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
         player->visited_x[VISITED_HISTORY - 1] = _x;
         player->visited_z[VISITED_HISTORY - 1] = _z;
 
-        uint32_t r = fast_rand();
-        uint8_t in_nether_zone = player->z >= NETHER_ZONE_OFFSET;
-        // Gate spawn attempts to preserve tick stability.
-        if (r % PASSIVE_SPAWN_CHANCE == 0) {
-          // Spawn candidate near chunk edge in movement direction.
-          short mob_x = (_x + dx * VIEW_DISTANCE) * 16 + ((r >> 4) & 15);
-          short mob_z = (_z + dz * VIEW_DISTANCE) * 16 + ((r >> 8) & 15);
-          // Search upward for a valid spawn column.
-          uint8_t mob_y = cy - 8;
-          uint8_t b_low = getBlockAt(mob_x, mob_y - 1, mob_z);
-          uint8_t b_mid = getBlockAt(mob_x, mob_y, mob_z);
-          uint8_t b_top = getBlockAt(mob_x, mob_y + 1, mob_z);
-          while (mob_y < 255) {
-            if ( // Require solid ground and free blocks at feet/head.
-              !isPassableBlock(b_low) &&
-              isPassableSpawnBlock(b_mid) &&
-              isPassableSpawnBlock(b_top)
-            ) break;
-            b_low = b_mid;
-            b_mid = b_top;
-            b_top = getBlockAt(mob_x, mob_y + 2, mob_z);
-            mob_y ++;
-          }
-          if (mob_y != 255) {
-            // Spawn passives by day above ground, hostiles otherwise.
-            if ((world_time < 13000 || world_time > 23460) && mob_y > 48) {
-              if (in_nether_zone) {
-                // Keep nether-zone population sparse.
-                if ((r >> 12) & 1) spawnMob(145, mob_x, mob_y, mob_z, 20); // Zombie stand-in
-              } else {
-                uint32_t mob_choice = (r >> 12) % 5;
-                if (mob_choice == 0) spawnMob(25, mob_x, mob_y, mob_z, 4); // Chicken
-                else if (mob_choice == 1) spawnMob(28, mob_x, mob_y, mob_z, 10); // Cow
-                else if (mob_choice == 2) spawnMob(95, mob_x, mob_y, mob_z, 10); // Pig
-                else if (mob_choice == 3) spawnMob(106, mob_x, mob_y, mob_z, 8); // Sheep
-                else if (getMobCountByType(ENTITY_TYPE_VILLAGER) < MAX_VILLAGERS) {
-                  spawnMob(ENTITY_TYPE_VILLAGER, mob_x, mob_y, mob_z, 20); // Villager
+        #ifndef CHUNK_TEMPLATE_VISIBILITY_COMPAT
+          // Keep dynamic mob spawning disabled in template-compat mode.
+          // This avoids mid-session add_entity decode failures while
+          // clientbound entity serialization is being aligned to 1.21.11.
+          uint32_t r = fast_rand();
+          uint8_t in_nether_zone = player->z >= NETHER_ZONE_OFFSET;
+          // Gate spawn attempts to preserve tick stability.
+          if (r % PASSIVE_SPAWN_CHANCE == 0) {
+            // Spawn candidate near chunk edge in movement direction.
+            short mob_x = (_x + dx * VIEW_DISTANCE) * 16 + ((r >> 4) & 15);
+            short mob_z = (_z + dz * VIEW_DISTANCE) * 16 + ((r >> 8) & 15);
+            // Search upward for a valid spawn column.
+            uint8_t mob_y = cy - 8;
+            uint8_t b_low = getBlockAt(mob_x, mob_y - 1, mob_z);
+            uint8_t b_mid = getBlockAt(mob_x, mob_y, mob_z);
+            uint8_t b_top = getBlockAt(mob_x, mob_y + 1, mob_z);
+            while (mob_y < 255) {
+              if ( // Require solid ground and free blocks at feet/head.
+                !isPassableBlock(b_low) &&
+                isPassableSpawnBlock(b_mid) &&
+                isPassableSpawnBlock(b_top)
+              ) break;
+              b_low = b_mid;
+              b_mid = b_top;
+              b_top = getBlockAt(mob_x, mob_y + 2, mob_z);
+              mob_y ++;
+            }
+            if (mob_y != 255) {
+              // Spawn passives by day above ground, hostiles otherwise.
+              if ((world_time < 13000 || world_time > 23460) && mob_y > 48) {
+                if (in_nether_zone) {
+                  // Keep nether-zone population sparse.
+                  if ((r >> 12) & 1) spawnMob(145, mob_x, mob_y, mob_z, 20); // Zombie stand-in
                 } else {
-                  spawnMob(28, mob_x, mob_y, mob_z, 10); // Cow fallback
+                  uint32_t mob_choice = (r >> 12) % 5;
+                  if (mob_choice == 0) spawnMob(25, mob_x, mob_y, mob_z, 4); // Chicken
+                  else if (mob_choice == 1) spawnMob(28, mob_x, mob_y, mob_z, 10); // Cow
+                  else if (mob_choice == 2) spawnMob(95, mob_x, mob_y, mob_z, 10); // Pig
+                  else if (mob_choice == 3) spawnMob(106, mob_x, mob_y, mob_z, 8); // Sheep
+                  else if (getMobCountByType(ENTITY_TYPE_VILLAGER) < MAX_VILLAGERS) {
+                    spawnMob(ENTITY_TYPE_VILLAGER, mob_x, mob_y, mob_z, 20); // Villager
+                  } else {
+                    spawnMob(28, mob_x, mob_y, mob_z, 10); // Cow fallback
+                  }
                 }
+              } else if (!in_nether_zone || ((r >> 13) & 1)) {
+                spawnMob(145, mob_x, mob_y, mob_z, 20); // Zombie
               }
-            } else if (!in_nether_zone || ((r >> 13) & 1)) {
-              spawnMob(145, mob_x, mob_y, mob_z, 20); // Zombie
             }
           }
-        }
+        #endif
 
         int count = 0;
         #ifdef DEV_LOG_CHUNK_GENERATION
@@ -667,7 +676,7 @@ int main () {
     exit(EXIT_FAILURE);
   }
   printf("Server listening on port %d...\n", PORT);
-  printf("Build marker: chunk-v6-template-0x2c\n");
+  printf("Build marker: chunk-v7-template-pool\n");
 
   // Use non-blocking I/O to avoid stalling the main loop.
   #ifdef _WIN32
