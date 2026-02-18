@@ -74,8 +74,12 @@ world-reset: ## Delete persisted world/player state (world.bin) to force a fresh
 	@rm -f world.bin
 	@echo "Removed world.bin. Next server start will regenerate world/player state."
 
-world-regen: ## Reset world. Optional template refresh only when REFRESH_TEMPLATES=1.
-	@$(MAKE) world-reset
+world-regen: ## Reset world and generate a new world.meta seed (optional: SEED=1234 RNG_SEED=5678).
+	@rm -f world.bin world.meta
+	@seed="$${SEED:-$$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')}"; \
+	rng_seed="$${RNG_SEED:-$$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')}"; \
+	printf "NETHR_META_V1\nWORLD_SEED=%s\nRNG_SEED=%s\n" "$$seed" "$$rng_seed" > world.meta; \
+	echo "Regenerated world state with WORLD_SEED=$$seed RNG_SEED=$$rng_seed"
 	@if [ "$${REFRESH_TEMPLATES:-0}" = "1" ]; then \
 		$(MAKE) template-refresh TEMPLATE_HOST="$(TEMPLATE_HOST)" TEMPLATE_PORT="$(TEMPLATE_PORT)" TEMPLATE_TARGET="$(TEMPLATE_TARGET)" TEMPLATE_TIMEOUT="$(TEMPLATE_TIMEOUT)"; \
 	else \

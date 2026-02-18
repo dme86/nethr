@@ -31,8 +31,15 @@
 ssize_t recv_count;
 uint8_t recv_buffer[MAX_RECV_BUF_LEN] = {0};
 
+uint32_t world_seed_raw = INITIAL_WORLD_SEED;
+uint32_t rng_seed_raw = INITIAL_RNG_SEED;
 uint32_t world_seed = INITIAL_WORLD_SEED;
 uint32_t rng_seed = INITIAL_RNG_SEED;
+
+short world_spawn_x = 8;
+uint8_t world_spawn_y = 80;
+short world_spawn_z = 8;
+uint8_t world_spawn_locked = false;
 
 uint16_t world_time = 0;
 uint32_t server_ticks = 0;

@@ -50,6 +50,16 @@ static uint8_t templateChunkCompatActive () {
   #endif
 }
 
+static uint8_t parseSeedOverride (const char *env_name, uint32_t *out) {
+  const char *value = getenv(env_name);
+  if (value == NULL || value[0] == '\0') return false;
+  char *end = NULL;
+  unsigned long parsed = strtoul(value, &end, 10);
+  if (end == NULL || *end != '\0') return false;
+  *out = (uint32_t)parsed;
+  return true;
+}
+
 #if !defined(ESP_PLATFORM) && !defined(_WIN32)
 
 #define ADMIN_PIPE_PATH "/tmp/nethr-admin.pipe"
@@ -624,15 +634,33 @@ int main () {
       }
   #endif
 
-  // Hash startup seeds before first use.
-  world_seed = splitmix64(world_seed);
+  int meta_status = loadWorldMeta();
+  if (meta_status == -1) {
+    printf("WARNING: Failed to parse world.meta, using built-in seed defaults\n");
+  }
+
+  if (parseSeedOverride("NETHR_WORLD_SEED", &world_seed_raw)) {
+    printf("Seed override: NETHR_WORLD_SEED=%u\n", world_seed_raw);
+  }
+  if (parseSeedOverride("NETHR_RNG_SEED", &rng_seed_raw)) {
+    printf("Seed override: NETHR_RNG_SEED=%u\n", rng_seed_raw);
+  }
+
+  // Hash runtime seeds before first use.
+  world_seed = splitmix64(world_seed_raw);
+  rng_seed = splitmix64(rng_seed_raw);
+
+  printf("World seed (raw): %u\n", world_seed_raw);
+  printf("RNG seed (raw): %u\n", rng_seed_raw);
   printf("World seed (hashed): ");
   for (int i = 3; i >= 0; i --) printf("%X", (unsigned int)((world_seed >> (8 * i)) & 255));
-
-  rng_seed = splitmix64(rng_seed);
   printf("\nRNG seed (hashed): ");
   for (int i = 3; i >= 0; i --) printf("%X", (unsigned int)((rng_seed >> (8 * i)) & 255));
-  printf("\n\n");
+  printf("\n");
+  if (world_spawn_locked) {
+    printf("World spawn (from meta): x=%d y=%u z=%d\n", world_spawn_x, world_spawn_y, world_spawn_z);
+  }
+  printf("\n");
 
   // Mark all block-change slots as unused.
   for (int i = 0; i < MAX_BLOCK_CHANGES; i ++) {
@@ -642,6 +670,8 @@ int main () {
 
   // Initialize persistence backend when enabled.
   if (initSerializer()) exit(EXIT_FAILURE);
+  ensureWorldSpawn();
+  saveWorldMeta();
 
   // Initialize client slots and state tables.
   int clients[MAX_PLAYERS], client_index = 0;

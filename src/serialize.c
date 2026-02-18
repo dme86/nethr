@@ -5,10 +5,13 @@
 #ifdef ESP_PLATFORM
   #include "esp_littlefs.h"
   #define FILE_PATH "/littlefs/world.bin"
+  #define META_FILE_PATH "/littlefs/world.meta"
 #else
   #include <stdio.h>
   #define FILE_PATH "world.bin"
+  #define META_FILE_PATH "world.meta"
 #endif
+#include <string.h>
 
 #include "tools.h"
 #include "registries.h"
@@ -16,6 +19,90 @@
 #include "procedures.h"
 
 int64_t last_disk_sync_time = 0;
+
+// Loads world seed/spawn metadata when present.
+// Returns 1 when loaded, 0 when missing, -1 on parse error.
+int loadWorldMeta () {
+  FILE *file = fopen(META_FILE_PATH, "rb");
+  if (!file) return 0;
+
+  char line[128];
+  if (!fgets(line, sizeof(line), file)) {
+    fclose(file);
+    return -1;
+  }
+  if (strncmp(line, "NETHR_META_V1", 13) != 0) {
+    fclose(file);
+    return -1;
+  }
+
+  uint8_t has_world_seed = false;
+  uint8_t has_rng_seed = false;
+  uint8_t has_spawn_x = false;
+  uint8_t has_spawn_y = false;
+  uint8_t has_spawn_z = false;
+
+  while (fgets(line, sizeof(line), file)) {
+    unsigned int u = 0;
+    int d = 0;
+    if (sscanf(line, "WORLD_SEED=%u", &u) == 1) {
+      world_seed_raw = (uint32_t)u;
+      has_world_seed = true;
+      continue;
+    }
+    if (sscanf(line, "RNG_SEED=%u", &u) == 1) {
+      rng_seed_raw = (uint32_t)u;
+      has_rng_seed = true;
+      continue;
+    }
+    if (sscanf(line, "SPAWN_X=%d", &d) == 1) {
+      world_spawn_x = (short)d;
+      has_spawn_x = true;
+      continue;
+    }
+    if (sscanf(line, "SPAWN_Y=%u", &u) == 1) {
+      world_spawn_y = (uint8_t)u;
+      has_spawn_y = true;
+      continue;
+    }
+    if (sscanf(line, "SPAWN_Z=%d", &d) == 1) {
+      world_spawn_z = (short)d;
+      has_spawn_z = true;
+      continue;
+    }
+  }
+  fclose(file);
+
+  if (!has_world_seed || !has_rng_seed) return -1;
+  if (has_spawn_x && has_spawn_y && has_spawn_z) {
+    world_spawn_locked = true;
+  }
+
+  printf(
+    "Loaded world.meta: raw_world_seed=%u raw_rng_seed=%u spawn=%d,%u,%d%s\n",
+    world_seed_raw, rng_seed_raw,
+    world_spawn_x, world_spawn_y, world_spawn_z,
+    world_spawn_locked ? " (fixed)" : " (pending)"
+  );
+
+  return 1;
+}
+
+// Persists world seed/spawn metadata.
+void saveWorldMeta () {
+  FILE *file = fopen(META_FILE_PATH, "wb");
+  if (!file) {
+    perror("Failed to open \"world.meta\" for writing");
+    return;
+  }
+  fprintf(file, "NETHR_META_V1\n");
+  fprintf(file, "WORLD_SEED=%u\n", world_seed_raw);
+  fprintf(file, "RNG_SEED=%u\n", rng_seed_raw);
+  fprintf(file, "SPAWN_X=%d\n", world_spawn_x);
+  fprintf(file, "SPAWN_Y=%u\n", world_spawn_y);
+  fprintf(file, "SPAWN_Z=%d\n", world_spawn_z);
+  fclose(file);
+}
 
 // Restores world data from disk, or initializes a new world file.
 int initSerializer () {

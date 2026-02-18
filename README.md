@@ -40,7 +40,7 @@ Registry data must be generated from an official Minecraft server JAR before com
 - `make doctor` runs toolchain + lint checks.
 - `make clean` removes build outputs and generated registry artifacts.
 - `make world-reset` deletes `world.bin` for a fresh world/player state.
-- `make world-regen` runs `world-reset`; optional template refresh via `REFRESH_TEMPLATES=1`.
+- `make world-regen` resets `world.bin` + `world.meta` and writes fresh seeds (`SEED=`/`RNG_SEED=` optional).
 - `make template-refresh` captures chunk templates from a running Notchian server (default `127.0.0.1:25566`).
 
 Generated artifacts (`include/registries.h`, `src/registries.c`) and the local `notchian/` workspace are intentionally not tracked in git.
@@ -82,6 +82,7 @@ The FIFO is stream-based (not a regular text file): once consumed by the server,
 
 ## Persistence (Optional)
 On PC builds, world/player state is persisted to `world.bin` by default.
+World seed + selected spawn are persisted to `world.meta`.
 
 For ESP-class deployments:
 - Configure LittleFS and enable `SYNC_WORLD_TO_DISK` in `include/globals.h`.
@@ -109,9 +110,12 @@ Development-only fallback:
 1. Reset world quickly:
    - `make world-regen`
    - `make run`
-2. Refresh templates (if Notchian probe server is running on `127.0.0.1:25566`):
+2. Reset world with a fixed, reproducible seed:
+   - `make world-regen SEED=123456789`
+   - `make run`
+3. Refresh templates (if Notchian probe server is running on `127.0.0.1:25566`):
    - `REFRESH_TEMPLATES=1 make world-regen`
-3. Validate procedural chunk path:
+4. Validate procedural chunk path:
    - `make world-regen`
    - `NETHR_DISABLE_TEMPLATE_CHUNKS=1 make run`
    - Check for `Chunk encoder v8` in server logs.

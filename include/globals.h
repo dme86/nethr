@@ -175,6 +175,13 @@ extern uint8_t recv_buffer[MAX_RECV_BUF_LEN];
 
 extern uint32_t world_seed;
 extern uint32_t rng_seed;
+extern uint32_t world_seed_raw;
+extern uint32_t rng_seed_raw;
+
+extern short world_spawn_x;
+extern uint8_t world_spawn_y;
+extern short world_spawn_z;
+extern uint8_t world_spawn_locked;
 
 extern uint16_t world_time;
 extern uint32_t server_ticks;

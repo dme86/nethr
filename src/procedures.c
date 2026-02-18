@@ -35,6 +35,91 @@ static uint8_t isInNetherZone (short z) {
   return z >= NETHER_ZONE_OFFSET;
 }
 
+static const char *spawnBiomeName (uint8_t biome) {
+  switch (biome) {
+    case W_plains: return "plains";
+    case W_mangrove_swamp: return "mangrove_swamp";
+    case W_desert: return "desert";
+    case W_snowy_plains: return "snowy_plains";
+    case W_beach: return "beach";
+    default: return "unknown";
+  }
+}
+
+void ensureWorldSpawn () {
+  if (world_spawn_locked) return;
+
+  int best_score = -2147483647;
+  short best_x = 8;
+  short best_z = 8;
+  uint8_t best_y = getHeightAt(8, 8) + 1;
+  uint8_t best_biome = W_plains;
+
+  // Scan a bounded radius around origin and pick a gentle, traversable area.
+  for (int radius = 0; radius <= 128; radius += 8) {
+    for (int x = -radius; x <= radius; x += 4) {
+      for (int z = -radius; z <= radius; z += 4) {
+        if (radius > 0 && abs(x) != radius && abs(z) != radius) continue;
+
+        uint8_t y = getHeightAt(x, z);
+        if (y < 60 || y > 96) continue;
+
+        uint8_t block = getBlockAt(x, y, z);
+        uint8_t feet = getBlockAt(x, y + 1, z);
+        uint8_t head = getBlockAt(x, y + 2, z);
+        if (isPassableBlock(block)) continue;
+        if (!isPassableSpawnBlock(feet) || !isPassableSpawnBlock(head)) continue;
+
+        uint8_t h_n = getHeightAt(x, z - 1);
+        uint8_t h_s = getHeightAt(x, z + 1);
+        uint8_t h_w = getHeightAt(x - 1, z);
+        uint8_t h_e = getHeightAt(x + 1, z);
+        uint8_t h_min = h_n;
+        uint8_t h_max = h_n;
+        if (h_s < h_min) h_min = h_s;
+        if (h_w < h_min) h_min = h_w;
+        if (h_e < h_min) h_min = h_e;
+        if (h_s > h_max) h_max = h_s;
+        if (h_w > h_max) h_max = h_w;
+        if (h_e > h_max) h_max = h_e;
+        int slope = (int)h_max - (int)h_min;
+        if (slope > 4) continue;
+
+        uint8_t biome = getChunkBiome(div_floor(x, CHUNK_SIZE), div_floor(z, CHUNK_SIZE));
+
+        int score = 200;
+        if (biome == W_plains) score += 220;
+        else if (biome == W_snowy_plains) score += 120;
+        else if (biome == W_desert) score += 80;
+        else if (biome == W_mangrove_swamp) score += 30;
+        else if (biome == W_beach) score -= 160;
+        score -= slope * 40;
+        score -= abs((int)y - 70) * 2;
+        score -= radius / 2;
+
+        if (score > best_score) {
+          best_score = score;
+          best_x = (short)x;
+          best_z = (short)z;
+          best_y = (uint8_t)(y + 1);
+          best_biome = biome;
+        }
+      }
+    }
+  }
+
+  world_spawn_x = best_x;
+  world_spawn_y = best_y;
+  world_spawn_z = best_z;
+  world_spawn_locked = true;
+  saveWorldMeta();
+
+  printf(
+    "Selected world spawn: x=%d y=%u z=%d biome=%s score=%d\n",
+    world_spawn_x, world_spawn_y, world_spawn_z, spawnBiomeName(best_biome), best_score
+  );
+}
+
 #define BLOCK_CHANGE_BUCKETS 1024
 
 static int16_t block_change_bucket_heads[BLOCK_CHANGE_BUCKETS];
@@ -158,9 +243,9 @@ void resetPlayerData (PlayerData *player) {
   player->health = 20;
   player->hunger = 20;
   player->saturation = 2500;
-  player->x = 8;
-  player->z = 8;
-  player->y = 80;
+  player->x = world_spawn_x;
+  player->z = world_spawn_z;
+  player->y = world_spawn_y;
   player->flags |= 0x02;
   player->grounded_y = 0;
   for (int i = 0; i < 41; i ++) {
@@ -448,13 +533,19 @@ int givePlayerItem (PlayerData *player, uint16_t item, uint8_t count) {
 void spawnPlayer (PlayerData *player) {
 
   // Player spawn coordinates, initialized to placeholders
-  float spawn_x = 8.5f, spawn_y = 80.0f, spawn_z = 8.5f;
+  float spawn_x = (float)world_spawn_x + 0.5f;
+  float spawn_y = (float)world_spawn_y;
+  float spawn_z = (float)world_spawn_z + 0.5f;
   float spawn_yaw = 0.0f, spawn_pitch = 0.0f;
 
   if (player->flags & 0x02) { // Is this a new player?
-    // Determine spawning Y coordinate based on terrain height
-    spawn_y = getHeightAt(8, 8) + 1;
-    player->y = spawn_y;
+    // Use server-selected world spawn for first login.
+    player->x = world_spawn_x;
+    player->z = world_spawn_z;
+    player->y = world_spawn_y;
+    spawn_x = (float)world_spawn_x + 0.5f;
+    spawn_y = (float)world_spawn_y;
+    spawn_z = (float)world_spawn_z + 0.5f;
     player->flags &= ~0x02;
   } else { // Not a new player
     // Calculate spawn position from player data
@@ -510,11 +601,15 @@ void spawnPlayer (PlayerData *player) {
 
   // Indicate that we're about to send chunk data
   printf("Spawn sequence: set_default_spawn_position + game_event(wait_chunks) + set_chunk_cache_center\n");
-  int default_spawn_y = getHeightAt(8, 8) + 1;
+  int default_spawn_y = world_spawn_y;
   #ifdef CHUNK_TEMPLATE_VISIBILITY_COMPAT
     default_spawn_y = 112;
   #endif
-  sc_setDefaultSpawnPosition(player->client_fd, "minecraft:overworld", 8, default_spawn_y, 8, 0.0f, 0.0f);
+  sc_setDefaultSpawnPosition(
+    player->client_fd, "minecraft:overworld",
+    world_spawn_x, default_spawn_y, world_spawn_z,
+    0.0f, 0.0f
+  );
   sc_startWaitingForChunks(player->client_fd);
   sc_setCenterChunk(player->client_fd, _x, _z);
 
