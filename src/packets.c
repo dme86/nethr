@@ -67,6 +67,7 @@ static void initSkyLightBuffers () {
 
 #define CHUNK_TEMPLATE_POOL_MAX 64
 #define CHUNK_TEMPLATE_ASSIGN_CAPACITY 16384
+#define CHUNK_TEMPLATE_SPAWN_SAFE_RADIUS 3
 
 // Template pool for compatibility mode: we replay known-good Notchian
 // level_chunk_with_light packets and patch only chunk x/z coordinates.
@@ -83,6 +84,48 @@ static int32_t chunk_template_grid_max_z = 0;
 static int chunk_template_grid_width = 0;
 static int chunk_template_grid_height = 0;
 static uint8_t chunk_template_grid_complete = false;
+static int16_t chunk_template_grid_lookup[CHUNK_TEMPLATE_POOL_MAX];
+static int chunk_template_spawn_anchor_index = -1;
+static int chunk_template_spawn_anchor_gx = 0;
+static int chunk_template_spawn_anchor_gz = 0;
+static int32_t readInt32BE (const uint8_t *buf);
+
+static int loadChunkTemplateFile (const char *path) {
+  if (chunk_template_0x2c_pool_count >= CHUNK_TEMPLATE_POOL_MAX) return 0;
+  FILE *fp = fopen(path, "rb");
+  if (fp == NULL) return 0;
+
+  if (fseek(fp, 0, SEEK_END) != 0) {
+    fclose(fp);
+    return 0;
+  }
+  long size = ftell(fp);
+  if (size <= 0 || size > 1 << 20) {
+    fclose(fp);
+    return 0;
+  }
+  rewind(fp);
+
+  uint8_t *buf = malloc((size_t)size);
+  if (buf == NULL) {
+    fclose(fp);
+    return 0;
+  }
+  size_t read_n = fread(buf, 1, (size_t)size, fp);
+  fclose(fp);
+  if (read_n != (size_t)size || buf[0] != 0x2C || size < 9) {
+    free(buf);
+    return 0;
+  }
+
+  int idx = chunk_template_0x2c_pool_count;
+  chunk_template_0x2c_pool[idx] = buf;
+  chunk_template_0x2c_pool_len[idx] = (size_t)size;
+  chunk_template_0x2c_src_x[idx] = readInt32BE(buf + 1);
+  chunk_template_0x2c_src_z[idx] = readInt32BE(buf + 5);
+  chunk_template_0x2c_pool_count ++;
+  return 1;
+}
 
 // Runtime assignment cache:
 // world chunk (x,z) -> chosen template index.
@@ -111,12 +154,6 @@ static int32_t readInt32BE (const uint8_t *buf) {
     ((uint32_t)buf[2] << 8) |
     (uint32_t)buf[3];
   return (int32_t)u;
-}
-
-static int positiveMod (int value, int mod) {
-  // Modulo that behaves consistently for negative world coordinates.
-  int r = value % mod;
-  return r < 0 ? r + mod : r;
 }
 
 static uint32_t hashChunkCoord (int32_t x, int32_t z) {
@@ -164,18 +201,62 @@ static void templateGridXY (int template_index, int *gx, int *gz) {
   *gz = chunk_template_0x2c_src_z[template_index] - chunk_template_grid_min_z;
 }
 
-static int toroidalDistance1D (int a, int b, int mod) {
-  int d = a - b;
-  if (d < 0) d = -d;
-  if (mod > 0 && d > mod - d) d = mod - d;
-  return d;
+static int clampInt (int value, int min_value, int max_value) {
+  if (value < min_value) return min_value;
+  if (value > max_value) return max_value;
+  return value;
+}
+
+static int gridLookupIndex (int gx, int gz) {
+  if (!chunk_template_grid_complete) return -1;
+  if (gx < 0 || gz < 0) return -1;
+  if (gx >= chunk_template_grid_width || gz >= chunk_template_grid_height) return -1;
+  int index = gz * chunk_template_grid_width + gx;
+  if (index < 0 || index >= CHUNK_TEMPLATE_POOL_MAX) return -1;
+  return index;
+}
+
+static int templateIndexAtGrid (int gx, int gz) {
+  int lookup = gridLookupIndex(gx, gz);
+  if (lookup == -1) return -1;
+  int idx = chunk_template_grid_lookup[lookup];
+  if (idx < 0 || idx >= chunk_template_0x2c_pool_count) return -1;
+  return idx;
+}
+
+static uint8_t isSpawnSafeAreaChunk (int32_t world_x, int32_t world_z) {
+  // Keep the central spawn region coherent and easy to traverse.
+  return
+    world_x >= -CHUNK_TEMPLATE_SPAWN_SAFE_RADIUS &&
+    world_x <= CHUNK_TEMPLATE_SPAWN_SAFE_RADIUS &&
+    world_z >= -CHUNK_TEMPLATE_SPAWN_SAFE_RADIUS &&
+    world_z <= CHUNK_TEMPLATE_SPAWN_SAFE_RADIUS;
+}
+
+static int selectTemplateForSpawnArea (int32_t world_x, int32_t world_z) {
+  if (!chunk_template_grid_complete) return -1;
+  // Use a contiguous source window around a spawn anchor that prefers flatter
+  // chunks (small packet size heuristic). Clamp instead of wrap to avoid
+  // cyclic patterns directly around spawn.
+  int want_gx = chunk_template_spawn_anchor_gx + (int)world_x;
+  int want_gz = chunk_template_spawn_anchor_gz + (int)world_z;
+  want_gx = clampInt(want_gx, 0, chunk_template_grid_width - 1);
+  want_gz = clampInt(want_gz, 0, chunk_template_grid_height - 1);
+  return templateIndexAtGrid(want_gx, want_gz);
 }
 
 static int selectTemplateByNeighbors (int32_t world_x, int32_t world_z) {
+  if (chunk_template_0x2c_pool_count <= 0) return -1;
+
   // If we cannot reason on a coherent source grid, fallback to deterministic hash.
-  if (!chunk_template_grid_complete || chunk_template_0x2c_pool_count <= 0) {
+  if (!chunk_template_grid_complete) {
     uint32_t h = hashChunkCoord(world_x, world_z);
     return (int)(h % (uint32_t)chunk_template_0x2c_pool_count);
+  }
+
+  if (isSpawnSafeAreaChunk(world_x, world_z)) {
+    int spawn_idx = selectTemplateForSpawnArea(world_x, world_z);
+    if (spawn_idx != -1) return spawn_idx;
   }
 
   // Neighbor constraints:
@@ -198,20 +279,20 @@ static int selectTemplateByNeighbors (int32_t world_x, int32_t world_z) {
     if (left != -1) {
       int lgx, lgz;
       templateGridXY(left, &lgx, &lgz);
-      int want_x = positiveMod(lgx + 1, chunk_template_grid_width);
+      int want_x = lgx + 1;
       int want_z = lgz;
-      int dx = toroidalDistance1D(gx, want_x, chunk_template_grid_width);
-      int dz = toroidalDistance1D(gz, want_z, chunk_template_grid_height);
+      int dx = gx - want_x;
+      int dz = gz - want_z;
       score += dx * dx + dz * dz;
       constraints ++;
     }
     if (right != -1) {
       int rgx, rgz;
       templateGridXY(right, &rgx, &rgz);
-      int want_x = positiveMod(rgx - 1, chunk_template_grid_width);
+      int want_x = rgx - 1;
       int want_z = rgz;
-      int dx = toroidalDistance1D(gx, want_x, chunk_template_grid_width);
-      int dz = toroidalDistance1D(gz, want_z, chunk_template_grid_height);
+      int dx = gx - want_x;
+      int dz = gz - want_z;
       score += dx * dx + dz * dz;
       constraints ++;
     }
@@ -219,9 +300,9 @@ static int selectTemplateByNeighbors (int32_t world_x, int32_t world_z) {
       int ugx, ugz;
       templateGridXY(up, &ugx, &ugz);
       int want_x = ugx;
-      int want_z = positiveMod(ugz + 1, chunk_template_grid_height);
-      int dx = toroidalDistance1D(gx, want_x, chunk_template_grid_width);
-      int dz = toroidalDistance1D(gz, want_z, chunk_template_grid_height);
+      int want_z = ugz + 1;
+      int dx = gx - want_x;
+      int dz = gz - want_z;
       score += dx * dx + dz * dz;
       constraints ++;
     }
@@ -229,9 +310,9 @@ static int selectTemplateByNeighbors (int32_t world_x, int32_t world_z) {
       int dgx, dgz;
       templateGridXY(down, &dgx, &dgz);
       int want_x = dgx;
-      int want_z = positiveMod(dgz - 1, chunk_template_grid_height);
-      int dx = toroidalDistance1D(gx, want_x, chunk_template_grid_width);
-      int dz = toroidalDistance1D(gz, want_z, chunk_template_grid_height);
+      int want_z = dgz - 1;
+      int dx = gx - want_x;
+      int dz = gz - want_z;
       score += dx * dx + dz * dz;
       constraints ++;
     }
@@ -261,47 +342,23 @@ static void tryLoadChunkTemplate0x2cPool () {
   if (chunk_template_0x2c_pool_loaded) return;
   chunk_template_0x2c_pool_loaded = true;
 
-  // Load chunk_template_00.bin, chunk_template_01.bin, ... until a file
-  // is missing. This keeps template management trivial.
+  // Load chunk_template_00.bin, chunk_template_01.bin, ... .
+  // We do not stop at first gap, so a missing file does not disable the pool.
+  int files_found = 0;
   for (int i = 0; i < CHUNK_TEMPLATE_POOL_MAX; i ++) {
     char path[96];
     snprintf(path, sizeof(path), "assets/chunks/chunk_template_%02d.bin", i);
-    FILE *fp = fopen(path, "rb");
-    if (fp == NULL) break;
+    files_found += loadChunkTemplateFile(path);
+  }
 
-    if (fseek(fp, 0, SEEK_END) != 0) {
-      fclose(fp);
-      continue;
-    }
-    long size = ftell(fp);
-    if (size <= 0 || size > 1 << 20) {
-      fclose(fp);
-      continue;
-    }
-    rewind(fp);
-
-    uint8_t *buf = malloc((size_t)size);
-    if (buf == NULL) {
-      fclose(fp);
-      continue;
-    }
-    size_t read_n = fread(buf, 1, (size_t)size, fp);
-    fclose(fp);
-    if (read_n != (size_t)size || buf[0] != 0x2C || size < 9) {
-      free(buf);
-      continue;
-    }
-
-    int idx = chunk_template_0x2c_pool_count;
-    chunk_template_0x2c_pool[idx] = buf;
-    chunk_template_0x2c_pool_len[idx] = (size_t)size;
-    chunk_template_0x2c_src_x[idx] = readInt32BE(buf + 1);
-    chunk_template_0x2c_src_z[idx] = readInt32BE(buf + 5);
-    chunk_template_0x2c_pool_count ++;
+  // Backward-compatible fallback: old single-template capture path.
+  if (chunk_template_0x2c_pool_count == 0) {
+    files_found += loadChunkTemplateFile("assets/chunk_template_1.21.11_0x2c.bin");
   }
 
   if (chunk_template_0x2c_pool_count == 0) {
-    printf("Chunk template pool unavailable at assets/chunks; using built-in encoder\n\n");
+    printf("Chunk template pool unavailable (assets/chunks empty or invalid); using built-in encoder\n");
+    printf("Hint: run `make template-refresh` while Notchian is running on 127.0.0.1:25566\n\n");
     return;
   }
 
@@ -317,6 +374,10 @@ static void tryLoadChunkTemplate0x2cPool () {
   }
   chunk_template_grid_width = chunk_template_grid_max_x - chunk_template_grid_min_x + 1;
   chunk_template_grid_height = chunk_template_grid_max_z - chunk_template_grid_min_z + 1;
+  for (int i = 0; i < CHUNK_TEMPLATE_POOL_MAX; i ++) chunk_template_grid_lookup[i] = -1;
+  chunk_template_spawn_anchor_index = -1;
+  chunk_template_spawn_anchor_gx = 0;
+  chunk_template_spawn_anchor_gz = 0;
   chunk_template_grid_complete = false;
   if (chunk_template_grid_width > 0 && chunk_template_grid_height > 0 &&
     chunk_template_grid_width * chunk_template_grid_height == chunk_template_0x2c_pool_count
@@ -328,6 +389,10 @@ static void tryLoadChunkTemplate0x2cPool () {
         for (int i = 0; i < chunk_template_0x2c_pool_count; i ++) {
           if (chunk_template_0x2c_src_x[i] == x && chunk_template_0x2c_src_z[i] == z) {
             found = true;
+            int gx = x - chunk_template_grid_min_x;
+            int gz = z - chunk_template_grid_min_z;
+            int lookup = gridLookupIndex(gx, gz);
+            if (lookup != -1) chunk_template_grid_lookup[lookup] = (int16_t)i;
             break;
           }
         }
@@ -340,14 +405,46 @@ static void tryLoadChunkTemplate0x2cPool () {
     }
   }
 
-  printf("Loaded notchian chunk template pool (0x2C): %d templates\n", chunk_template_0x2c_pool_count);
+  if (chunk_template_grid_complete) {
+    // Spawn anchor heuristic:
+    // choose the template with the smallest packet body (usually flatter,
+    // lower-detail terrain) so joining feels closer to grassland/plains.
+    size_t best_len = (size_t)-1;
+    for (int i = 0; i < chunk_template_0x2c_pool_count; i ++) {
+      size_t len = chunk_template_0x2c_pool_len[i];
+      if (len < best_len) {
+        best_len = len;
+        chunk_template_spawn_anchor_index = i;
+      }
+    }
+    if (chunk_template_spawn_anchor_index >= 0) {
+      templateGridXY(chunk_template_spawn_anchor_index, &chunk_template_spawn_anchor_gx, &chunk_template_spawn_anchor_gz);
+    }
+  }
+
   printf(
-    "  Source span: x=[%d..%d] z=[%d..%d], grid=%dx%d, complete=%s\n\n",
+    "Loaded notchian chunk template pool (0x2C): %d templates (files_loaded=%d)\n",
+    chunk_template_0x2c_pool_count, files_found
+  );
+  printf(
+    "  Source span: x=[%d..%d] z=[%d..%d], grid=%dx%d, complete=%s, spawn_safe_radius=%d\n",
     chunk_template_grid_min_x, chunk_template_grid_max_x,
     chunk_template_grid_min_z, chunk_template_grid_max_z,
     chunk_template_grid_width, chunk_template_grid_height,
-    chunk_template_grid_complete ? "yes" : "no"
+    chunk_template_grid_complete ? "yes" : "no",
+    CHUNK_TEMPLATE_SPAWN_SAFE_RADIUS
   );
+  if (chunk_template_spawn_anchor_index >= 0) {
+    printf(
+      "  Spawn anchor: template=%d src=(%d,%d) body_len=%zu (flat/plains heuristic)\n\n",
+      chunk_template_spawn_anchor_index,
+      chunk_template_0x2c_src_x[chunk_template_spawn_anchor_index],
+      chunk_template_0x2c_src_z[chunk_template_spawn_anchor_index],
+      chunk_template_0x2c_pool_len[chunk_template_spawn_anchor_index]
+    );
+  } else {
+    printf("  Spawn anchor: unavailable (non-complete grid)\n\n");
+  }
 }
 
 static int readVarIntFromMemory (const uint8_t *data, size_t len, size_t *offset, uint32_t *value) {
