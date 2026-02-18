@@ -14,6 +14,46 @@ static uint8_t isNetherZone (int z) {
   return z >= NETHER_ZONE_OFFSET;
 }
 
+static float lerp01 (float a, float b, float t) {
+  return a + (b - a) * t;
+}
+
+static float smoothstep01 (float t) {
+  return t * t * (3.0f - 2.0f * t);
+}
+
+static float hash01_2d (int x, int z, uint64_t salt) {
+  uint64_t key = ((uint64_t)(uint32_t)x << 32) | (uint32_t)z;
+  uint32_t h = (uint32_t)splitmix64(key ^ salt ^ world_seed);
+  return (float)(h & 0x00FFFFFFu) / 16777215.0f;
+}
+
+static float valueNoise2D (int x, int z, int scale, uint64_t salt) {
+  int cell_x = div_floor(x, scale);
+  int cell_z = div_floor(z, scale);
+  float tx = (float)mod_abs(x, scale) / (float)scale;
+  float tz = (float)mod_abs(z, scale) / (float)scale;
+  tx = smoothstep01(tx);
+  tz = smoothstep01(tz);
+
+  float n00 = hash01_2d(cell_x, cell_z, salt);
+  float n10 = hash01_2d(cell_x + 1, cell_z, salt);
+  float n01 = hash01_2d(cell_x, cell_z + 1, salt);
+  float n11 = hash01_2d(cell_x + 1, cell_z + 1, salt);
+
+  float nx0 = lerp01(n00, n10, tx);
+  float nx1 = lerp01(n01, n11, tx);
+  return lerp01(nx0, nx1, tz);
+}
+
+static float fractalNoise2D (int x, int z, uint64_t salt) {
+  // Multi-octave value noise yields large biome continents with local variation.
+  float n0 = valueNoise2D(x, z, 48, salt ^ 0x9E3779B97F4A7C15ULL);
+  float n1 = valueNoise2D(x, z, 24, salt ^ 0xD1B54A32D192ED03ULL);
+  float n2 = valueNoise2D(x, z, 12, salt ^ 0x94D049BB133111EBULL);
+  return n0 * 0.60f + n1 * 0.28f + n2 * 0.12f;
+}
+
 static uint32_t getCoordinateHash (int x, int y, int z) {
   uint64_t xy = ((uint64_t)(uint32_t)x << 32) | (uint32_t)y;
   uint64_t h = splitmix64(xy ^ world_seed);
@@ -34,29 +74,21 @@ uint32_t getChunkHash (short x, short z) {
 uint8_t getChunkBiome (short x, short z) {
 
   if (isNetherZone(z * CHUNK_SIZE)) return W_desert;
+  // Keep the join area consistently friendly and traversable.
+  if (abs((int)x) <= 24 && abs((int)z) <= 24) return W_plains;
 
-  // Center biomes on 0;0
-  x += BIOME_RADIUS;
-  z += BIOME_RADIUS;
+  // Procedural, non-periodic biome fields in minichunk space.
+  float temperature = fractalNoise2D(x, z, 0xA7F3D95B6C1209E1ULL);
+  float humidity = fractalNoise2D(x, z, 0xC6BC279692B5CC83ULL);
+  float continental = fractalNoise2D(x, z, 0x8EBC6AF09C88C6E3ULL);
 
-  // Calculate distance from biome center
-  int8_t dx = BIOME_RADIUS - mod_abs(x, BIOME_SIZE);
-  int8_t dz = BIOME_RADIUS - mod_abs(z, BIOME_SIZE);
-  // Each biome is a circular island, with beaches in-between
-  // Determine whether the given chunk is within the island
-  if (dx * dx + dz * dz > BIOME_RADIUS * BIOME_RADIUS) return W_beach;
+  // Coastline band around low continentalness.
+  if (continental < 0.30f) return W_beach;
 
-  // Calculate "biome coordinates" (one step above chunk coordinates)
-  short biome_x = div_floor(x, BIOME_SIZE);
-  short biome_z = div_floor(z, BIOME_SIZE);
-
-  // The biome itself is plucked directly from the world seed.
-  // The 32-bit seed is treated as a 4x4 biome matrix, with each biome
-  // Taking up 2 bytes. This is why there are only 4 biomes, excluding
-  // Beaches. Using the world seed as a repeating pattern avoids
-  // Having to generate and layer yet another hash.
-  uint8_t index = abs((biome_x & 3) + ((biome_z * 4) & 15));
-  return (world_seed >> (index * 2)) & 3;
+  if (temperature < 0.28f) return W_snowy_plains;
+  if (temperature > 0.68f && humidity < 0.42f) return W_desert;
+  if (humidity > 0.70f && temperature > 0.45f) return W_mangrove_swamp;
+  return W_plains;
 
 }
 
