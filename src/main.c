@@ -41,6 +41,15 @@
 #include "procedures.h"
 #include "serialize.h"
 
+static uint8_t templateChunkCompatActive () {
+  #ifdef CHUNK_TEMPLATE_VISIBILITY_COMPAT
+    const char *env = getenv("NETHR_DISABLE_TEMPLATE_CHUNKS");
+    return !(env != NULL && env[0] == '1');
+  #else
+    return false;
+  #endif
+}
+
 #if !defined(ESP_PLATFORM) && !defined(_WIN32)
 
 #define ADMIN_PIPE_PATH "/tmp/nethr-admin.pipe"
@@ -212,10 +221,8 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
           sc_spawnEntityPlayer(client_fd, player_data[i]);
         }
 
-        #ifndef CHUNK_TEMPLATE_VISIBILITY_COMPAT
-          // In template-compat mode we suppress mob entity traffic because
-          // add_entity for all mob variants is still being stabilized.
-          // Spawn currently allocated mobs for this client.
+        if (!templateChunkCompatActive()) {
+          // Spawn currently allocated mobs for this client in procedural mode.
           uint8_t uuid[16];
           uint32_t r = fast_rand();
           memcpy(uuid, &r, 4);
@@ -231,7 +238,7 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
             );
             broadcastMobMetadata(client_fd, -2 - i);
           }
-        #endif
+        }
 
       }
       break;
@@ -415,10 +422,8 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
         player->visited_x[VISITED_HISTORY - 1] = _x;
         player->visited_z[VISITED_HISTORY - 1] = _z;
 
-        #ifndef CHUNK_TEMPLATE_VISIBILITY_COMPAT
-          // Keep dynamic mob spawning disabled in template-compat mode.
-          // This avoids mid-session add_entity decode failures while
-          // clientbound entity serialization is being aligned to 1.21.11.
+        if (!templateChunkCompatActive()) {
+          // Dynamic mob spawning stays active in procedural mode.
           uint32_t r = fast_rand();
           uint8_t in_nether_zone = player->z >= NETHER_ZONE_OFFSET;
           // Gate spawn attempts to preserve tick stability.
@@ -465,7 +470,7 @@ void handlePacket (int client_fd, int length, int packet_id, int state) {
               }
             }
           }
-        #endif
+        }
 
         int count = 0;
         #ifdef DEV_LOG_CHUNK_GENERATION
