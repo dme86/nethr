@@ -79,9 +79,32 @@ static uint8_t getSurfaceBlockForBiome (uint8_t biome, uint8_t variant, uint8_t 
   if (biome == W_snowy_plains) return B_snowy_grass_block;
   if (biome == W_desert) return B_sand;
   if (biome == W_beach) return B_sand;
-  if (biome == W_plains && variant == 0) return B_stone;
+  // Keep plains mostly grassy/playable; retain some dirt patches for variation.
   if (biome == W_plains && variant == 1) return B_dirt;
   return B_grass_block;
+}
+
+static uint8_t getFlowerBlockFromHash (uint32_t hash, uint8_t biome) {
+  uint8_t v = (uint8_t)(hash & 15);
+  if (biome == W_snowy_plains) {
+    if (v < 4) return B_allium;
+    if (v < 8) return B_azure_bluet;
+    if (v < 11) return B_white_tulip;
+    if (v < 13) return B_oxeye_daisy;
+    return B_lily_of_the_valley;
+  }
+  // Plains: mixed meadow flowers.
+  if (v == 0) return B_dandelion;
+  if (v == 1) return B_poppy;
+  if (v == 2) return B_cornflower;
+  if (v == 3) return B_allium;
+  if (v == 4) return B_azure_bluet;
+  if (v == 5) return B_red_tulip;
+  if (v == 6) return B_orange_tulip;
+  if (v == 7) return B_white_tulip;
+  if (v == 8) return B_pink_tulip;
+  if (v == 9) return B_oxeye_daisy;
+  return B_lily_of_the_valley;
 }
 
 static uint32_t getCoordinateHash (int x, int y, int z) {
@@ -316,34 +339,56 @@ uint8_t getTerrainAtFromCache (int x, int y, int z, int rx, int rz, ChunkAnchor 
   uint8_t variant = (anchor.hash >> 20) & 3;
 
   if (y >= 64 && y >= height && feature.y != 255) switch (anchor.biome) {
-    case W_plains: { // Generate trees in plains groves
+    case W_plains:
+    case W_snowy_plains:
+    case W_mangrove_swamp: {
+      // Biome-aware tree pass with deterministic silhouette and leaf mix.
+      if (feature.y < 64 && anchor.biome != W_snowy_plains) break;
 
-      // Don't generate trees underwater
-      if (feature.y < 64) break;
-
-      // Handle tree stem and the dirt under it
-      if (x == feature.x && z == feature.z) {
-        if (y == feature.y - 1) return B_dirt;
-        if (y >= feature.y && y < feature.y - feature.variant + 6) return B_oak_log;
+      if (anchor.biome == W_mangrove_swamp) {
+        if (x == feature.x && z == feature.z && y == 64 && height < 63) return B_lily_pad;
+        if (y == height + 1) {
+          uint8_t mdx = x > feature.x ? x - feature.x : feature.x - x;
+          uint8_t mdz = z > feature.z ? z - feature.z : feature.z - z;
+          if (mdx + mdz < 4) return B_moss_carpet;
+        }
       }
 
-      // Get X/Z distance from center of tree
+      uint8_t tree_type = feature.variant & 3;
+      uint8_t tall = (feature.variant >> 2) & 1;
+      uint8_t crown = (feature.variant >> 3) & 1;
+      uint8_t trunk_h = (uint8_t)(4 + tall + ((tree_type == 1) ? 1 : 0));
+      uint8_t base_block = (anchor.biome == W_mangrove_swamp) ? B_mud : B_dirt;
+
+      uint8_t leaf_primary = B_oak_leaves;
+      uint8_t leaf_secondary = B_oak_leaves;
+      if (tree_type == 1) {
+        leaf_primary = B_azalea_leaves;
+        leaf_secondary = B_flowering_azalea_leaves;
+      } else if (tree_type == 2) {
+        leaf_primary = B_flowering_azalea_leaves;
+        leaf_secondary = B_azalea_leaves;
+      }
+
+      if (x == feature.x && z == feature.z) {
+        if (y == feature.y - 1) return base_block;
+        if (y >= feature.y && y < feature.y + trunk_h) return B_oak_log;
+      }
+
       uint8_t dx = x > feature.x ? x - feature.x : feature.x - x;
       uint8_t dz = z > feature.z ? z - feature.z : feature.z - z;
+      int rel = y - ((int)feature.y + (int)trunk_h - 3);
 
-      // Generate leaf clusters
-      if (dx < 3 && dz < 3 && y > feature.y - feature.variant + 2 && y < feature.y - feature.variant + 5) {
-        if (y == feature.y - feature.variant + 4 && dx == 2 && dz == 2) break;
-        return B_oak_leaves;
+      if (rel == 0 || rel == 1) {
+        if (dx <= 2 && dz <= 2) {
+          if ((dx == 2 && dz == 2) && (((feature.x + feature.z + y) & 1) == 0)) break;
+          return (tree_type == 2) ? leaf_secondary : leaf_primary;
+        }
       }
-      if (dx < 2 && dz < 2 && y >= feature.y - feature.variant + 5 && y <= feature.y - feature.variant + 6) {
-        if (y == feature.y - feature.variant + 6 && dx == 1 && dz == 1) break;
-        return B_oak_leaves;
-      }
+      if (rel == 2 && dx <= 1 && dz <= 1) return leaf_primary;
+      if (rel == 3 && crown && dx == 0 && dz == 0) return leaf_secondary;
 
-      // Since we're sure that we're above sea level and in a plains biome,
-      // There's no need to drop down to decide the surrounding blocks.
-      if (y == height) return B_grass_block;
+      if (y == height) return getSurfaceBlockForBiome(anchor.biome, variant, height);
       return B_air;
     }
 
@@ -356,36 +401,15 @@ uint8_t getTerrainAtFromCache (int x, int y, int z, int rx, int rz, ChunkAnchor 
       } else if (y > height) {
         // The size of the cactus is determined based on whether the terrain
         // Height is even or odd at the target location
-        if (height & 1 && y <= height + 3) return B_cactus;
+        if (height & 1 && y <= height + 3) {
+          if (y == height + 3 && (((x ^ z) & 255) < WORLDGEN_DESERT_CACTUS_FLOWER_CHANCE)) return B_cactus_flower;
+          return B_cactus;
+        }
         if (y <= height + 2) return B_cactus;
       }
 
       break;
 
-    }
-
-    case W_mangrove_swamp: { // Generate lilypads and moss carpets in swamps
-
-      if (x == feature.x && z == feature.z && y == 64 && height < 63) {
-        return B_lily_pad;
-      }
-
-      if (y == height + 1) {
-        uint8_t dx = x > feature.x ? x - feature.x : feature.x - x;
-        uint8_t dz = z > feature.z ? z - feature.z : feature.z - z;
-        if (dx + dz < 4) return B_moss_carpet;
-      }
-
-      break;
-    }
-
-    case W_snowy_plains: { // Generate grass stubs in snowy plains
-
-      if (x == feature.x && z == feature.z && y == height + 1 && height >= 64) {
-        return B_short_grass;
-      }
-
-      break;
     }
 
     default: break;
@@ -394,13 +418,7 @@ uint8_t getTerrainAtFromCache (int x, int y, int z, int rx, int rz, ChunkAnchor 
   // Handle surface-level terrain (the very topmost blocks)
   if (height >= 63) {
     if (y == height) {
-      if (anchor.biome == W_mangrove_swamp) return B_mud;
-      if (anchor.biome == W_snowy_plains) return B_snowy_grass_block;
-      if (anchor.biome == W_desert) return B_sand;
-      if (anchor.biome == W_beach) return B_sand;
-      if (anchor.biome == W_plains && variant == 0) return B_stone;
-      if (anchor.biome == W_plains && variant == 1) return B_dirt;
-      return B_grass_block;
+      return getSurfaceBlockForBiome(anchor.biome, variant, height);
     }
     if (y == height + 1 && height >= 64) {
       // Surface decorator pass: deterministic biome-specific patches/clusters.
@@ -426,11 +444,10 @@ uint8_t getTerrainAtFromCache (int x, int y, int z, int rx, int rz, ChunkAnchor 
           if (
             flower_patch > ((float)WORLDGEN_FLOWER_PATCH_THRESHOLD / 100.0f) &&
             deco < WORLDGEN_PLAINS_FLOWER_CHANCE
-          ) {
-            uint8_t flower = (uint8_t)((getCoordinateHash(x, 1, z) >> 5) & 3);
-            if (flower == 0) return B_dandelion;
-            if (flower == 1) return B_poppy;
-            return B_cornflower;
+          ) return getFlowerBlockFromHash(getCoordinateHash(x, 1, z), W_plains);
+
+          if (deco < WORLDGEN_PLAINS_MUSHROOM_CHANCE) {
+            return ((getCoordinateHash(x, 5, z) & 1) == 0) ? B_brown_mushroom : B_red_mushroom;
           }
 
           if (deco < WORLDGEN_PLAINS_GRASS_CHANCE) return B_short_grass;
@@ -438,8 +455,18 @@ uint8_t getTerrainAtFromCache (int x, int y, int z, int rx, int rz, ChunkAnchor 
       } else if (anchor.biome == W_desert) {
         if (deco < WORLDGEN_DESERT_DEAD_BUSH_CHANCE) return B_dead_bush;
       } else if (anchor.biome == W_snowy_plains) {
+        if (deco < WORLDGEN_SNOWY_MUSHROOM_CHANCE) {
+          return ((getCoordinateHash(x, 6, z) & 1) == 0) ? B_brown_mushroom : B_red_mushroom;
+        }
+        if (deco < WORLDGEN_PLAINS_FLOWER_CHANCE / 2) {
+          return getFlowerBlockFromHash(getCoordinateHash(x, 7, z), W_snowy_plains);
+        }
         if (deco < WORLDGEN_SNOWY_GRASS_CHANCE) return B_short_grass;
       } else if (anchor.biome == W_mangrove_swamp) {
+        if (deco < WORLDGEN_SWAMP_MUSHROOM_CHANCE && y > 64) {
+          return ((getCoordinateHash(x, 8, z) & 1) == 0) ? B_brown_mushroom : B_red_mushroom;
+        }
+        if (deco < WORLDGEN_SWAMP_GRASS_CHANCE / 2 && y > 64) return B_fern;
         if (deco < WORLDGEN_SWAMP_GRASS_CHANCE && y > 64) return B_short_grass;
       }
     }
@@ -533,26 +560,34 @@ ChunkFeature getFeatureFromAnchor (ChunkAnchor anchor) {
       anchor.x, anchor.z, anchor.hash, anchor.biome
     ) + 1;
 
-    // Tree placement rules: only in specific biomes, on proper top blocks,
-    // and clustered into groves via low-frequency patch noise.
+    // Tree placement rules: biome-specific chance plus grove clustering.
     uint8_t top = getSurfaceBlockForBiome(anchor.biome, (anchor.hash >> 20) & 3, (uint8_t)(feature.y - 1));
-    if (top != B_grass_block) {
+    if (
+      top != B_grass_block &&
+      top != B_snowy_grass_block &&
+      top != B_dirt &&
+      top != B_mud
+    ) {
       feature.y = 0xFF;
       return feature;
     }
 
     int tree_chance = 0;
+    float tree_patch = valueNoise2D(
+      anchor.x, anchor.z, WORLDGEN_TREE_PATCH_SCALE, 0xAF43D2895B1EC704ULL
+    );
+    float grove = tree_patch - 0.45f;
+    if (grove < 0.0f) grove = 0.0f;
+    grove *= 2.0f;
+    if (grove > 1.0f) grove = 1.0f;
+    grove *= grove;
+
     if (anchor.biome == W_plains) {
-      float tree_patch = valueNoise2D(
-        anchor.x, anchor.z, WORLDGEN_TREE_PATCH_SCALE, 0xAF43D2895B1EC704ULL
-      );
-      // Patch curve: low outside groves, high in grove centers.
-      float grove = tree_patch - 0.45f;
-      if (grove < 0.0f) grove = 0.0f;
-      grove *= 2.0f;
-      if (grove > 1.0f) grove = 1.0f;
-      grove *= grove;
       tree_chance = WORLDGEN_PLAINS_TREE_BASE_CHANCE + (int)(grove * WORLDGEN_PLAINS_TREE_PATCH_BONUS);
+    } else if (anchor.biome == W_snowy_plains) {
+      tree_chance = WORLDGEN_SNOWY_TREE_BASE_CHANCE + (int)(grove * (WORLDGEN_PLAINS_TREE_PATCH_BONUS / 2));
+    } else if (anchor.biome == W_mangrove_swamp) {
+      tree_chance = WORLDGEN_SWAMP_TREE_BASE_CHANCE + (int)(grove * WORLDGEN_SWAMP_TREE_PATCH_BONUS);
     } else {
       feature.y = 0xFF;
       return feature;
@@ -564,8 +599,12 @@ ChunkFeature getFeatureFromAnchor (ChunkAnchor anchor) {
       return feature;
     }
 
-    // Tree variant controls trunk height jitter.
-    feature.variant = (anchor.hash >> (feature.x + feature.z)) & 1;
+    // Tree variant packs type/height/crown bits for lightweight silhouettes:
+    // bits 0..1 type, bit 2 tall, bit 3 top crown.
+    uint8_t shape_bits = (uint8_t)((anchor.hash >> ((feature.x + feature.z) & 15)) & 0x0F);
+    if (anchor.biome == W_mangrove_swamp) shape_bits = (shape_bits & 0x0C) | 2;
+    if (anchor.biome == W_snowy_plains) shape_bits = (shape_bits & 0x0C) | 1;
+    feature.variant = shape_bits;
   }
 
   return feature;
