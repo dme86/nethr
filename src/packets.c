@@ -66,6 +66,7 @@ static void initSkyLightBuffers () {
 }
 
 #define CHUNK_TEMPLATE_POOL_MAX 64
+#define CHUNK_TEMPLATE_ASSIGN_CAPACITY 16384
 
 // Template pool for compatibility mode: we replay known-good Notchian
 // level_chunk_with_light packets and patch only chunk x/z coordinates.
@@ -82,6 +83,18 @@ static int32_t chunk_template_grid_max_z = 0;
 static int chunk_template_grid_width = 0;
 static int chunk_template_grid_height = 0;
 static uint8_t chunk_template_grid_complete = false;
+
+// Runtime assignment cache:
+// world chunk (x,z) -> chosen template index.
+// We keep this stable so revisits never "flip" terrain variants.
+typedef struct {
+  int32_t x;
+  int32_t z;
+  int16_t template_index;
+  uint8_t used;
+} ChunkTemplateAssignment;
+
+static ChunkTemplateAssignment chunk_template_assignments[CHUNK_TEMPLATE_ASSIGN_CAPACITY];
 
 static void writeInt32BE (uint8_t *buf, int32_t v) {
   uint32_t u = (uint32_t)v;
@@ -104,6 +117,144 @@ static int positiveMod (int value, int mod) {
   // Modulo that behaves consistently for negative world coordinates.
   int r = value % mod;
   return r < 0 ? r + mod : r;
+}
+
+static uint32_t hashChunkCoord (int32_t x, int32_t z) {
+  uint32_t ux = (uint32_t)x;
+  uint32_t uz = (uint32_t)z;
+  return ux * 73856093u ^ uz * 19349663u;
+}
+
+static int findChunkTemplateAssignmentSlot (int32_t x, int32_t z, uint8_t create) {
+  uint32_t h = hashChunkCoord(x, z);
+  int first_free = -1;
+  for (int i = 0; i < CHUNK_TEMPLATE_ASSIGN_CAPACITY; i ++) {
+    int slot = (int)((h + (uint32_t)i) % CHUNK_TEMPLATE_ASSIGN_CAPACITY);
+    ChunkTemplateAssignment *entry = &chunk_template_assignments[slot];
+    if (!entry->used) {
+      if (!create) return -1;
+      if (first_free == -1) first_free = slot;
+      break;
+    }
+    if (entry->x == x && entry->z == z) return slot;
+  }
+  if (!create || first_free == -1) return -1;
+  chunk_template_assignments[first_free].used = true;
+  chunk_template_assignments[first_free].x = x;
+  chunk_template_assignments[first_free].z = z;
+  chunk_template_assignments[first_free].template_index = -1;
+  return first_free;
+}
+
+static int getChunkTemplateAssignment (int32_t x, int32_t z) {
+  int slot = findChunkTemplateAssignmentSlot(x, z, false);
+  if (slot == -1) return -1;
+  return chunk_template_assignments[slot].template_index;
+}
+
+static void setChunkTemplateAssignment (int32_t x, int32_t z, int template_index) {
+  int slot = findChunkTemplateAssignmentSlot(x, z, true);
+  if (slot == -1) return;
+  chunk_template_assignments[slot].template_index = (int16_t)template_index;
+}
+
+static void templateGridXY (int template_index, int *gx, int *gz) {
+  // Convert absolute source chunk coords into local grid coords.
+  *gx = chunk_template_0x2c_src_x[template_index] - chunk_template_grid_min_x;
+  *gz = chunk_template_0x2c_src_z[template_index] - chunk_template_grid_min_z;
+}
+
+static int toroidalDistance1D (int a, int b, int mod) {
+  int d = a - b;
+  if (d < 0) d = -d;
+  if (mod > 0 && d > mod - d) d = mod - d;
+  return d;
+}
+
+static int selectTemplateByNeighbors (int32_t world_x, int32_t world_z) {
+  // If we cannot reason on a coherent source grid, fallback to deterministic hash.
+  if (!chunk_template_grid_complete || chunk_template_0x2c_pool_count <= 0) {
+    uint32_t h = hashChunkCoord(world_x, world_z);
+    return (int)(h % (uint32_t)chunk_template_0x2c_pool_count);
+  }
+
+  // Neighbor constraints:
+  // left/right/up/down already-assigned chunks provide "ideal" next source cell.
+  int left = getChunkTemplateAssignment(world_x - 1, world_z);
+  int right = getChunkTemplateAssignment(world_x + 1, world_z);
+  int up = getChunkTemplateAssignment(world_x, world_z - 1);
+  int down = getChunkTemplateAssignment(world_x, world_z + 1);
+
+  int best_index = -1;
+  int best_score = 0x7FFFFFFF;
+  uint32_t jitter = hashChunkCoord(world_x, world_z);
+
+  for (int i = 0; i < chunk_template_0x2c_pool_count; i ++) {
+    int gx, gz;
+    templateGridXY(i, &gx, &gz);
+    int score = 0;
+    int constraints = 0;
+
+    if (left != -1) {
+      int lgx, lgz;
+      templateGridXY(left, &lgx, &lgz);
+      int want_x = positiveMod(lgx + 1, chunk_template_grid_width);
+      int want_z = lgz;
+      int dx = toroidalDistance1D(gx, want_x, chunk_template_grid_width);
+      int dz = toroidalDistance1D(gz, want_z, chunk_template_grid_height);
+      score += dx * dx + dz * dz;
+      constraints ++;
+    }
+    if (right != -1) {
+      int rgx, rgz;
+      templateGridXY(right, &rgx, &rgz);
+      int want_x = positiveMod(rgx - 1, chunk_template_grid_width);
+      int want_z = rgz;
+      int dx = toroidalDistance1D(gx, want_x, chunk_template_grid_width);
+      int dz = toroidalDistance1D(gz, want_z, chunk_template_grid_height);
+      score += dx * dx + dz * dz;
+      constraints ++;
+    }
+    if (up != -1) {
+      int ugx, ugz;
+      templateGridXY(up, &ugx, &ugz);
+      int want_x = ugx;
+      int want_z = positiveMod(ugz + 1, chunk_template_grid_height);
+      int dx = toroidalDistance1D(gx, want_x, chunk_template_grid_width);
+      int dz = toroidalDistance1D(gz, want_z, chunk_template_grid_height);
+      score += dx * dx + dz * dz;
+      constraints ++;
+    }
+    if (down != -1) {
+      int dgx, dgz;
+      templateGridXY(down, &dgx, &dgz);
+      int want_x = dgx;
+      int want_z = positiveMod(dgz - 1, chunk_template_grid_height);
+      int dx = toroidalDistance1D(gx, want_x, chunk_template_grid_width);
+      int dz = toroidalDistance1D(gz, want_z, chunk_template_grid_height);
+      score += dx * dx + dz * dz;
+      constraints ++;
+    }
+
+    if (constraints == 0) {
+      // No neighbors yet (frontier start): stable pseudo-random seed.
+      score = (int)((hashChunkCoord(world_x, world_z) + (uint32_t)i * 2654435761u) & 0x7FFF);
+    } else {
+      // Tiny deterministic jitter breaks ties while preserving continuity bias.
+      score += (int)((jitter ^ (uint32_t)i * 1103515245u) & 7u);
+    }
+
+    if (score < best_score) {
+      best_score = score;
+      best_index = i;
+    }
+  }
+
+  if (best_index == -1) {
+    uint32_t h = hashChunkCoord(world_x, world_z);
+    best_index = (int)(h % (uint32_t)chunk_template_0x2c_pool_count);
+  }
+  return best_index;
 }
 
 static void tryLoadChunkTemplate0x2cPool () {
@@ -843,26 +994,11 @@ int sc_setCenterChunk (int client_fd, int x, int y) {
 int sc_chunkDataAndUpdateLight (int client_fd, int _x, int _z) {
   tryLoadChunkTemplate0x2cPool();
   if (chunk_template_0x2c_pool_count > 0) {
-    int template_index = -1;
-    if (chunk_template_grid_complete) {
-      // Map server world chunks to the captured source-template grid.
-      // This keeps adjacent chunks visually coherent instead of random.
-      int mapped_x = chunk_template_grid_min_x +
-        positiveMod(_x - chunk_template_grid_min_x, chunk_template_grid_width);
-      int mapped_z = chunk_template_grid_min_z +
-        positiveMod(_z - chunk_template_grid_min_z, chunk_template_grid_height);
-      for (int i = 0; i < chunk_template_0x2c_pool_count; i ++) {
-        if (chunk_template_0x2c_src_x[i] == mapped_x && chunk_template_0x2c_src_z[i] == mapped_z) {
-          template_index = i;
-          break;
-        }
-      }
-    }
-    if (template_index == -1) {
-      // Fallback path when we don't have a complete grid: deterministic hash.
-      uint32_t hx = (uint32_t)_x * 73856093u;
-      uint32_t hz = (uint32_t)_z * 19349663u;
-      template_index = (int)((hx ^ hz) % (uint32_t)chunk_template_0x2c_pool_count);
+    // Assign once per world chunk and reuse forever in this process.
+    int template_index = getChunkTemplateAssignment(_x, _z);
+    if (template_index < 0 || template_index >= chunk_template_0x2c_pool_count) {
+      template_index = selectTemplateByNeighbors(_x, _z);
+      setChunkTemplateAssignment(_x, _z, template_index);
     }
     size_t body_len = chunk_template_0x2c_pool_len[template_index];
     uint8_t *body = malloc(body_len);
