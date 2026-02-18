@@ -39,6 +39,9 @@ Registry data must be generated from an official Minecraft server JAR before com
 - `make lint` runs compile-time lint checks for critical C issues.
 - `make doctor` runs toolchain + lint checks.
 - `make clean` removes build outputs and generated registry artifacts.
+- `make world-reset` deletes `world.bin` for a fresh world/player state.
+- `make world-regen` runs `world-reset`; optional template refresh via `REFRESH_TEMPLATES=1`.
+- `make template-refresh` captures chunk templates from a running Notchian server (default `127.0.0.1:25566`).
 
 Generated artifacts (`include/registries.h`, `src/registries.c`) and the local `notchian/` workspace are intentionally not tracked in git.
 
@@ -55,6 +58,12 @@ Common tuning options:
 - Movement broadcast load: disable `BROADCAST_ALL_MOVEMENT` and/or `SCALE_MOVEMENT_UPDATES_TO_PLAYER_COUNT` if network overhead is high.
 - Stability toggles: disable `ALLOW_CHESTS` or `DO_FLUID_FLOW` if needed on weaker hardware.
 - Chunk revisit behavior: increase `VISITED_HISTORY` to reduce repeated regeneration under constrained conditions.
+
+Runtime chunk pipeline:
+- Default: use Notchian-captured chunk templates (`assets/chunks/chunk_template_XX.bin`) when present.
+- Procedural fallback: built-in chunk encoder is used when templates are unavailable.
+- Force procedural mode explicitly:
+  - `NETHR_DISABLE_TEMPLATE_CHUNKS=1 make run`
 
 ## Admin System Chat Pipe (Linux)
 On Linux builds, nethr creates:
@@ -85,3 +94,24 @@ Development-only fallback:
 
 ## Reference
 - Java protocol documentation: https://minecraft.wiki/w/Java_Edition_protocol/Packets
+
+## Worldgen Status
+- Biomes now use deterministic multi-octave 2D noise in minichunk space.
+- Current overworld biome set:
+  - `minecraft:plains`
+  - `minecraft:mangrove_swamp`
+  - `minecraft:desert`
+  - `minecraft:snowy_plains`
+  - `minecraft:beach` (coastline band)
+- Spawn area near origin is biased to plains for more playable starts.
+
+## Test Commands
+1. Reset world quickly:
+   - `make world-regen`
+   - `make run`
+2. Refresh templates (if Notchian probe server is running on `127.0.0.1:25566`):
+   - `REFRESH_TEMPLATES=1 make world-regen`
+3. Validate procedural chunk path:
+   - `make world-regen`
+   - `NETHR_DISABLE_TEMPLATE_CHUNKS=1 make run`
+   - Check for `Chunk encoder v8` in server logs.

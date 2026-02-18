@@ -631,6 +631,12 @@ static size_t appendUint64BE (uint8_t *out, size_t off, uint64_t v) {
   return off;
 }
 
+static size_t appendUint16BE (uint8_t *out, size_t off, uint16_t v) {
+  out[off++] = (uint8_t)((v >> 8) & 0xFF);
+  out[off++] = (uint8_t)(v & 0xFF);
+  return off;
+}
+
 static size_t appendVarInt (uint8_t *out, size_t off, uint32_t v) {
   while (true) {
     if ((v & ~0x7FU) == 0) {
@@ -1134,85 +1140,108 @@ int sc_chunkDataAndUpdateLight (int client_fd, int _x, int _z) {
   }
 
   initSkyLightBuffers();
+  // Build the whole packet body in memory so all dynamic lengths are exact.
+  uint8_t *body = malloc(220000);
+  if (body == NULL) return 1;
+  size_t body_off = 0;
 
-  const int chunk_data_size = (4101 + sizeVarInt(256) + sizeof(network_block_palette)) * 20 + 6 * 12;
-  const int light_data_size = 14 + (sizeVarInt(2048) + 2048) * 26;
+  // 1.21.11: play/clientbound level_chunk_with_light
+  body_off = appendByte(body, body_off, 0x2C);
+  body_off = appendUint32BE(body, body_off, (uint32_t)_x);
+  body_off = appendUint32BE(body, body_off, (uint32_t)_z);
+  // Heightmaps NBT omitted.
+  body_off = appendVarInt(body, body_off, 0);
+
+  uint8_t *chunk_data = malloc(130000);
+  if (chunk_data == NULL) {
+    free(body);
+    return 1;
+  }
+  size_t chunk_data_off = 0;
+  int x = _x * 16, z = _z * 16, y;
+
+  // 4 empty/bedrock sections below build height.
+  for (int i = 0; i < 4; i ++) {
+    chunk_data_off = appendUint16BE(chunk_data, chunk_data_off, 4096);
+    chunk_data_off = appendByte(chunk_data, chunk_data_off, 0);     // block bits
+    chunk_data_off = appendVarInt(chunk_data, chunk_data_off, 85);  // bedrock
+    chunk_data_off = appendVarInt(chunk_data, chunk_data_off, 0);   // no block data longs
+    chunk_data_off = appendByte(chunk_data, chunk_data_off, 0);     // biome bits
+    chunk_data_off = appendVarInt(chunk_data, chunk_data_off, 0);   // plains
+    chunk_data_off = appendVarInt(chunk_data, chunk_data_off, 0);   // no biome data longs
+  }
+  task_yield();
+
+  // 20 generated sections.
+  for (int i = 0; i < 20; i ++) {
+    y = i * 16;
+    chunk_data_off = appendUint16BE(chunk_data, chunk_data_off, 4096);
+    chunk_data_off = appendByte(chunk_data, chunk_data_off, 8);     // block bits
+    chunk_data_off = appendVarInt(chunk_data, chunk_data_off, 256); // palette length
+    memcpy(chunk_data + chunk_data_off, network_block_palette, sizeof(network_block_palette));
+    chunk_data_off += sizeof(network_block_palette);
+    // 4096 blocks @ 8 bits per block -> 512 longs -> 4096 bytes packed data.
+    chunk_data_off = appendVarInt(chunk_data, chunk_data_off, 512);
+    uint8_t biome = buildChunkSection(x, y, z);
+    memcpy(chunk_data + chunk_data_off, chunk_section, 4096);
+    chunk_data_off += 4096;
+    chunk_data_off = appendByte(chunk_data, chunk_data_off, 0);     // biome bits
+    chunk_data_off = appendVarInt(chunk_data, chunk_data_off, biome);
+    chunk_data_off = appendVarInt(chunk_data, chunk_data_off, 0);   // no biome data longs
+    task_yield();
+  }
+
+  // 8 empty/air sections above build height.
+  for (int i = 0; i < 8; i ++) {
+    chunk_data_off = appendUint16BE(chunk_data, chunk_data_off, 4096);
+    chunk_data_off = appendByte(chunk_data, chunk_data_off, 0);    // block bits
+    chunk_data_off = appendVarInt(chunk_data, chunk_data_off, 0);  // air
+    chunk_data_off = appendVarInt(chunk_data, chunk_data_off, 0);  // no block data longs
+    chunk_data_off = appendByte(chunk_data, chunk_data_off, 0);    // biome bits
+    chunk_data_off = appendVarInt(chunk_data, chunk_data_off, 0);  // plains
+    chunk_data_off = appendVarInt(chunk_data, chunk_data_off, 0);  // no biome data longs
+  }
+
+  body_off = appendVarInt(body, body_off, (uint32_t)chunk_data_off);
+  memcpy(body + body_off, chunk_data, chunk_data_off);
+  body_off += chunk_data_off;
+  free(chunk_data);
+
+  // Omit block entities.
+  body_off = appendVarInt(body, body_off, 0);
+
+  // Light data (bit sets + sky arrays, block light omitted).
+  body_off = appendVarInt(body, body_off, 1);
+  body_off = appendUint64BE(body, body_off, 0b11111111111111111111111111ULL);
+  body_off = appendVarInt(body, body_off, 0);
+  body_off = appendVarInt(body, body_off, 0);
+  body_off = appendVarInt(body, body_off, 0);
+
+  body_off = appendVarInt(body, body_off, 28);
+  for (int i = 0; i < 8; i ++) {
+    body_off = appendVarInt(body, body_off, 2048);
+    memcpy(body + body_off, sky_light_dark, 2048);
+    body_off += 2048;
+  }
+  for (int i = 0; i < 18; i ++) {
+    body_off = appendVarInt(body, body_off, 2048);
+    memcpy(body + body_off, sky_light_full, 2048);
+    body_off += 2048;
+  }
+  body_off = appendVarInt(body, body_off, 0);
+
   static uint8_t logged_once = false;
   if (!logged_once) {
     printf(
-      "Chunk encoder v5: packet_id=0x2C body_len=%d chunk_data_size=%d (legacy-large)\n\n",
-      11 + sizeVarInt(chunk_data_size) + chunk_data_size + light_data_size, chunk_data_size
+      "Chunk encoder v8: packet_id=0x2C body_len=%zu chunk_data_len=%zu (procedural)\n\n",
+      body_off, chunk_data_off
     );
     logged_once = true;
   }
 
-  writeVarInt(client_fd, 11 + sizeVarInt(chunk_data_size) + chunk_data_size + light_data_size);
-  // 1.21.11: play/clientbound level_chunk_with_light
-  writeByte(client_fd, 0x2C);
-
-  writeUint32(client_fd, _x);
-  writeUint32(client_fd, _z);
-
-  writeVarInt(client_fd, 0); // Omit heightmaps
-
-  writeVarInt(client_fd, chunk_data_size);
-
-  int x = _x * 16, z = _z * 16, y;
-
-  // Send 4 chunk sections (up to Y=0) with no blocks
-  for (int i = 0; i < 4; i ++) {
-    writeUint16(client_fd, 4096); // Block count
-    writeByte(client_fd, 0); // Block bits
-    writeVarInt(client_fd, 85); // Block palette (bedrock)
-    writeByte(client_fd, 0); // Biome bits
-    writeByte(client_fd, 0); // Biome palette
-  }
-  task_yield();
-
-  // Send chunk sections
-  for (int i = 0; i < 20; i ++) {
-    y = i * 16;
-    writeUint16(client_fd, 4096); // Block count
-    writeByte(client_fd, 8); // Bits per entry
-    writeVarInt(client_fd, 256); // Block palette length
-    send_all(client_fd, network_block_palette, sizeof(network_block_palette));
-    uint8_t biome = buildChunkSection(x, y, z);
-    send_all(client_fd, chunk_section, 4096);
-    writeByte(client_fd, 0); // Bits per entry
-    writeByte(client_fd, biome); // Biome palette
-    task_yield();
-  }
-
-  // Send 8 chunk sections (up to Y=192) with no blocks
-  for (int i = 0; i < 8; i ++) {
-    writeUint16(client_fd, 4096); // Block count
-    writeByte(client_fd, 0); // Block bits
-    writeVarInt(client_fd, 0); // Block palette (air)
-    writeByte(client_fd, 0); // Biome bits
-    writeByte(client_fd, 0); // Biome palette
-  }
-
-  writeVarInt(client_fd, 0); // Omit block entities
-
-  // Light data
-  writeVarInt(client_fd, 1);
-  writeUint64(client_fd, 0b11111111111111111111111111);
-  writeVarInt(client_fd, 0);
-  writeVarInt(client_fd, 0);
-  writeVarInt(client_fd, 0);
-
-  // Sky light array
-  writeVarInt(client_fd, 28);
-  for (int i = 0; i < 8; i ++) {
-    writeVarInt(client_fd, 2048);
-    send_all(client_fd, sky_light_dark, 2048);
-  }
-  for (int i = 0; i < 18; i ++) {
-    writeVarInt(client_fd, 2048);
-    send_all(client_fd, sky_light_full, 2048);
-  }
-  // Don't send block light
-  writeVarInt(client_fd, 0);
+  writeVarInt(client_fd, (uint32_t)body_off);
+  send_all(client_fd, body, (ssize_t)body_off);
+  free(body);
 
   // Sending block updates changes light prediciton on the client.
   // Light-emitting blocks are omitted from chunk data so that they can
