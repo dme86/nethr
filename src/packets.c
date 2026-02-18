@@ -2239,14 +2239,18 @@ int cs_playerLoaded (int client_fd) {
 // C->S Accept Teleportation
 int cs_acceptTeleportation (int client_fd) {
   int teleport_id = readVarInt(client_fd);
-  printf("Play RX: accept_teleportation id=%d\n", teleport_id);
+  #ifdef DEV_LOG_UNKNOWN_PACKETS
+    printf("Play RX: accept_teleportation id=%d\n", teleport_id);
+  #endif
   return 0;
 }
 
 // C->S Chunk Batch Received
 int cs_chunkBatchReceived (int client_fd) {
   float desired = readFloat(client_fd);
-  printf("Play RX: chunk_batch_received desiredChunksPerTick=%.2f\n", desired);
+  #ifdef DEV_LOG_UNKNOWN_PACKETS
+    printf("Play RX: chunk_batch_received desiredChunksPerTick=%.2f\n", desired);
+  #endif
   return 0;
 }
 

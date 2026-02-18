@@ -70,6 +70,17 @@ static uint8_t parseIntOverride (const char *env_name, int *out) {
   return true;
 }
 
+static uint8_t shouldLogPlayRxPacket (int packet_id) {
+  // High-frequency packets that create log spam during normal play.
+  if (packet_id == 0x0C) return false; // Client tick
+  if (packet_id == 0x1B) return false; // Keep-alive response
+  if (packet_id == 0x1D) return false; // Set player position
+  if (packet_id == 0x1E) return false; // Set player position + rotation
+  if (packet_id == 0x1F) return false; // Set player rotation
+  if (packet_id == 0x20) return false; // Set movement flags
+  return true;
+}
+
 #if !defined(ESP_PLATFORM) && !defined(_WIN32)
 
 #define ADMIN_PIPE_PATH "/tmp/nethr-admin.pipe"
@@ -891,10 +902,12 @@ int main () {
         client_fd, packet_id, length, length - sizeVarInt(packet_id)
       );
     } else if (state == STATE_PLAY) {
-      printf(
-        "Play RX: fd=%d packet=0x%02X length=%d payload=%d\n",
-        client_fd, packet_id, length, length - sizeVarInt(packet_id)
-      );
+      if (shouldLogPlayRxPacket(packet_id)) {
+        printf(
+          "Play RX: fd=%d packet=0x%02X length=%d payload=%d\n",
+          client_fd, packet_id, length, length - sizeVarInt(packet_id)
+        );
+      }
     }
     // Reject legacy list ping probe.
     if (state == STATE_NONE && length == 254 && packet_id == 122) {
