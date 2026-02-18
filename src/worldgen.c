@@ -130,26 +130,41 @@ static uint8_t getBiomeFromClimateUncached (short x, short z) {
   if (abs((int)x) <= 10 && abs((int)z) <= 10) return W_plains;
 
   // Procedural non-periodic climate fields in minichunk space.
-  // We intentionally use few octaves to keep CPU predictable on low-end hosts.
-  float temperature = fractalNoise2D(x, z, 0xA7F3D95B6C1209E1ULL);
-  float humidity = fractalNoise2D(x, z, 0xC6BC279692B5CC83ULL);
-  float continental = fractalNoise2D(x, z, 0x8EBC6AF09C88C6E3ULL);
-  float weirdness = fractalNoise2D(x, z, 0xD7A9F13E21C4B6A5ULL);
+  // We map to [-1..1] to follow Vanilla biome parameter semantics
+  // (temperature/humidity/continentalness/weirdness).
+  float temperature = fractalNoise2D(x, z, 0xA7F3D95B6C1209E1ULL) * 2.0f - 1.0f;
+  float humidity = fractalNoise2D(x, z, 0xC6BC279692B5CC83ULL) * 2.0f - 1.0f;
+  float continental = fractalNoise2D(x, z, 0x8EBC6AF09C88C6E3ULL) * 2.0f - 1.0f;
+  float weirdness = fractalNoise2D(x, z, 0xD7A9F13E21C4B6A5ULL) * 2.0f - 1.0f;
   float river_noise = fractalNoise2D(x, z, 0xF13A5B9C6D7E8A01ULL);
 
-  // Coastline around low-continental regions.
-  if (continental < 0.26f) return W_beach;
-  // Thin river-like strips through inland terrain (cheap heuristic).
-  if (continental > 0.32f) {
+  // Vanilla-inspired inland bias: we only have one ocean-like biome proxy
+  // (W_beach), so we keep ocean/coast coverage narrower than full Notchian.
+  continental += 0.12f;
+  if (continental > 1.0f) continental = 1.0f;
+  if (continental < -1.0f) continental = -1.0f;
+
+  // Vanilla continentalness references:
+  // ocean < -0.19, coast roughly [-0.19 .. -0.11], inland >= -0.11.
+  // We compress ocean into narrow beach/ocean proxy bands.
+  if (continental < -0.46f) return W_beach;
+  if (continental < -0.20f) {
+    // Keep coast patchy and avoid giant continuous water rings.
+    if (((x ^ z) & 3) != 0) return W_plains;
+    return W_beach;
+  }
+
+  // Thin river-like strips through inland terrain.
+  if (continental > -0.08f) {
     float river_edge = river_noise - 0.5f;
     if (river_edge < 0.0f) river_edge = -river_edge;
-    if (river_edge < 0.035f) return W_beach;
+    if (river_edge < 0.018f) return W_beach;
   }
 
   // Climate mapping (compressed to currently implemented biome set).
-  if (temperature < 0.24f || (temperature < 0.30f && weirdness > 0.62f)) return W_snowy_plains;
-  if (temperature > 0.70f && humidity < 0.46f) return W_desert;
-  if (humidity > 0.72f && temperature > 0.44f && continental < 0.62f) return W_mangrove_swamp;
+  if (temperature < -0.32f || (temperature < -0.18f && weirdness > 0.45f)) return W_snowy_plains;
+  if (temperature > 0.52f && humidity < -0.12f) return W_desert;
+  if (humidity > 0.45f && temperature > 0.10f && continental < 0.36f) return W_mangrove_swamp;
   return W_plains;
 }
 

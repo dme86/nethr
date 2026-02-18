@@ -123,6 +123,10 @@
   #define MAX_BLOCK_CHANGES 20000
 #endif
 
+// Notchian-derived worldgen defaults generated from datapack JSON.
+// Regenerate via: make worldgen-sync-defaults
+#include "worldgen_notchian_defaults.h"
+
 // World decoration tuning (overridable via -D... build flags).
 // Values are probabilities in [0..255] for per-column decorators.
 #ifndef WORLDGEN_TREE_EDGE_MARGIN

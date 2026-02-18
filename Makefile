@@ -14,7 +14,7 @@ JAVA_BIN ?= $(if $(wildcard .deps/jdk/Contents/Home/bin/java),$(abspath .deps/jd
 NODE_BIN ?= $(if $(wildcard .deps/node/bin/node),$(abspath .deps/node/bin/node),node)
 LINT_CFLAGS ?= -std=gnu11 -fsyntax-only -Wformat -Werror=format-security -Werror=implicit-function-declaration -Werror=implicit-int -Werror=return-type -Werror=int-conversion -Werror=incompatible-pointer-types
 
-.PHONY: help tools-check doctor asdf-check asdf-install lint download-jar registries build run all clean clean-cache distclean world-reset world-regen template-refresh
+.PHONY: help tools-check doctor asdf-check asdf-install lint download-jar registries worldgen-sync-defaults build run all clean clean-cache distclean world-reset world-regen template-refresh
 
 help: ## Show this help message.
 	@awk 'BEGIN {FS = ":.*##"; printf "\nTargets:\n"} /^[a-zA-Z0-9_.-]+:.*##/ { printf "  %-14s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -50,6 +50,9 @@ download-jar: ## Download Minecraft server JAR to notchian/server.jar (override 
 
 registries: download-jar ## Generate include/registries.h and src/registries.c.
 	@PATH="$(abspath .deps/jdk/Contents/Home/bin):$(abspath .deps/node/bin):$$PATH" SERVER_JAR="$(notdir $(SERVER_JAR))" ./extract_registries.sh
+
+worldgen-sync-defaults: registries ## Derive nethr worldgen defaults from Notchian generated worldgen JSON.
+	@./scripts/extract_notchian_worldgen_defaults.py
 
 build: include/registries.h src/registries.c ## Build nethr binary.
 	@$(CC) src/*.c $(CPPFLAGS) $(EXTRA_CPPFLAGS) $(CFLAGS) -o nethr

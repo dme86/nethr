@@ -44,6 +44,7 @@ Registry data must be generated from an official Minecraft server JAR before com
 - `make world-reset` deletes `world.bin` for a fresh world/player state.
 - `make world-regen` resets `world.bin` + `world.meta` and writes fresh seeds (`SEED=`/`RNG_SEED=` optional).
 - `make template-refresh` captures chunk templates from a running Notchian server (default `127.0.0.1:25566`).
+- `make worldgen-sync-defaults` regenerates `include/worldgen_notchian_defaults.h` from Notchian worldgen JSON.
 
 Generated artifacts (`include/registries.h`, `src/registries.c`) and the local `notchian/` workspace are intentionally not tracked in git.
 
@@ -69,6 +70,7 @@ Common tuning options:
 - Terrain macro-shape can be tuned, e.g.:
   - `make build EXTRA_CPPFLAGS="-DWORLDGEN_VALLEY_DEPTH=16 -DWORLDGEN_MOUNTAIN_AMPLITUDE=42 -DWORLDGEN_MOUNTAIN_THRESHOLD=78 -DWORLDGEN_HEIGHT_CAP=180"`
   - `make build EXTRA_CPPFLAGS="-DWORLDGEN_CONTINENT_SCALE=64 -DWORLDGEN_EROSION_SCALE=64 -DWORLDGEN_RIDGE_SCALE=16 -DWORLDGEN_MOUNTAIN_CONTINENT_MIN=62 -DWORLDGEN_MOUNTAIN_EROSION_MAX=48"`
+  - Note: defaults are now generated from Notchian data where mappable (`include/worldgen_notchian_defaults.h`), then can still be overridden via `EXTRA_CPPFLAGS`.
 
 Runtime chunk pipeline:
 - Default: use procedural chunk generation (better biome continuity, less repetition).
