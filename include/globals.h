@@ -192,6 +192,14 @@
 #ifndef WORLDGEN_SWAMP_TREE_PATCH_BONUS
   #define WORLDGEN_SWAMP_TREE_PATCH_BONUS 116
 #endif
+// Scales sparse Notchian-derived placement rates to this project's simplified
+// single-pass decorator pipeline.
+#ifndef WORLDGEN_DECOR_DENSITY_SCALE
+  #define WORLDGEN_DECOR_DENSITY_SCALE 6
+#endif
+#ifndef WORLDGEN_TREE_DENSITY_SCALE
+  #define WORLDGEN_TREE_DENSITY_SCALE 5
+#endif
 
 // Terrain shape tuning (overridable via -D... build flags).
 // Values define amplitude/rarity for coherent macro terrain.
@@ -199,28 +207,28 @@
   #define WORLDGEN_HEIGHT_CAP 160
 #endif
 #ifndef WORLDGEN_ROLLING_AMPLITUDE
-  #define WORLDGEN_ROLLING_AMPLITUDE 8
+  #define WORLDGEN_ROLLING_AMPLITUDE 14
 #endif
 #ifndef WORLDGEN_HILL_AMPLITUDE
-  #define WORLDGEN_HILL_AMPLITUDE 7
+  #define WORLDGEN_HILL_AMPLITUDE 16
 #endif
 #ifndef WORLDGEN_VALLEY_DEPTH
-  #define WORLDGEN_VALLEY_DEPTH 12
+  #define WORLDGEN_VALLEY_DEPTH 20
 #endif
 #ifndef WORLDGEN_MOUNTAIN_AMPLITUDE
-  #define WORLDGEN_MOUNTAIN_AMPLITUDE 34
+  #define WORLDGEN_MOUNTAIN_AMPLITUDE 58
 #endif
 #ifndef WORLDGEN_MOUNTAIN_THRESHOLD
   #define WORLDGEN_MOUNTAIN_THRESHOLD 74
 #endif
 #ifndef WORLDGEN_CONTINENT_SCALE
-  #define WORLDGEN_CONTINENT_SCALE 64
+  #define WORLDGEN_CONTINENT_SCALE 48
 #endif
 #ifndef WORLDGEN_EROSION_SCALE
-  #define WORLDGEN_EROSION_SCALE 64
+  #define WORLDGEN_EROSION_SCALE 40
 #endif
 #ifndef WORLDGEN_RIDGE_SCALE
-  #define WORLDGEN_RIDGE_SCALE 16
+  #define WORLDGEN_RIDGE_SCALE 12
 #endif
 #ifndef WORLDGEN_MOUNTAIN_CONTINENT_MIN
   #define WORLDGEN_MOUNTAIN_CONTINENT_MIN 60

@@ -66,11 +66,11 @@ static float valueNoise2D (int x, int z, int scale, uint64_t salt) {
 }
 
 static float fractalNoise2D (int x, int z, uint64_t salt) {
-  // Multi-octave value noise yields large biome continents with local variation.
-  float n0 = valueNoise2D(x, z, 48, salt ^ 0x9E3779B97F4A7C15ULL);
-  float n1 = valueNoise2D(x, z, 24, salt ^ 0xD1B54A32D192ED03ULL);
-  float n2 = valueNoise2D(x, z, 12, salt ^ 0x94D049BB133111EBULL);
-  return n0 * 0.60f + n1 * 0.28f + n2 * 0.12f;
+  // Deliberately higher-frequency blend to increase visible terrain variation.
+  float n0 = valueNoise2D(x, z, 32, salt ^ 0x9E3779B97F4A7C15ULL);
+  float n1 = valueNoise2D(x, z, 12, salt ^ 0xD1B54A32D192ED03ULL);
+  float n2 = valueNoise2D(x, z, 6, salt ^ 0x94D049BB133111EBULL);
+  return n0 * 0.45f + n1 * 0.33f + n2 * 0.22f;
 }
 
 static uint8_t getSurfaceBlockForBiome (uint8_t biome, uint8_t variant, uint8_t height) {
@@ -105,6 +105,13 @@ static uint8_t getFlowerBlockFromHash (uint32_t hash, uint8_t biome) {
   if (v == 8) return B_pink_tulip;
   if (v == 9) return B_oxeye_daisy;
   return B_lily_of_the_valley;
+}
+
+static uint8_t scaleChanceU8 (uint8_t base, int scale) {
+  int v = (int)base * scale;
+  if (v > 255) v = 255;
+  if (v < 0) v = 0;
+  return (uint8_t)v;
 }
 
 static uint32_t getCoordinateHash (int x, int y, int z) {
@@ -553,6 +560,7 @@ uint8_t getTerrainAtFromCache (int x, int y, int z, int rx, int rz, ChunkAnchor 
       if (isWaterfallSpringCandidate(x, z, height, anchor.biome)) return B_water;
       // Surface decorator pass: deterministic biome-specific patches/clusters.
       uint8_t deco = (uint8_t)((getCoordinateHash(x, 0, z) >> 9) & 255);
+      uint8_t deco_hi = (uint8_t)((getCoordinateHash(x, 9, z) >> 11) & 255);
       uint8_t surface = getSurfaceBlockForBiome(anchor.biome, variant, height);
       if (anchor.biome == W_plains) {
         if (surface == B_grass_block) {
@@ -573,31 +581,34 @@ uint8_t getTerrainAtFromCache (int x, int y, int z, int rx, int rz, ChunkAnchor 
           );
           if (
             flower_patch > ((float)WORLDGEN_FLOWER_PATCH_THRESHOLD / 100.0f) &&
-            deco < WORLDGEN_PLAINS_FLOWER_CHANCE
+            deco < scaleChanceU8(WORLDGEN_PLAINS_FLOWER_CHANCE, WORLDGEN_DECOR_DENSITY_SCALE)
           ) return getFlowerBlockFromHash(getCoordinateHash(x, 1, z), W_plains);
 
-          if (deco < WORLDGEN_PLAINS_MUSHROOM_CHANCE) {
+          if (deco < scaleChanceU8(WORLDGEN_PLAINS_MUSHROOM_CHANCE, WORLDGEN_DECOR_DENSITY_SCALE)) {
             return ((getCoordinateHash(x, 5, z) & 1) == 0) ? B_brown_mushroom : B_red_mushroom;
           }
 
-          if (deco < WORLDGEN_PLAINS_GRASS_CHANCE) return B_short_grass;
+          if (deco < scaleChanceU8(WORLDGEN_PLAINS_GRASS_CHANCE, WORLDGEN_DECOR_DENSITY_SCALE)) {
+            if (deco_hi < 84) return B_fern;
+            return B_short_grass;
+          }
         }
       } else if (anchor.biome == W_desert) {
-        if (deco < WORLDGEN_DESERT_DEAD_BUSH_CHANCE) return B_dead_bush;
+        if (deco < scaleChanceU8(WORLDGEN_DESERT_DEAD_BUSH_CHANCE, WORLDGEN_DECOR_DENSITY_SCALE)) return B_dead_bush;
       } else if (anchor.biome == W_snowy_plains) {
-        if (deco < WORLDGEN_SNOWY_MUSHROOM_CHANCE) {
+        if (deco < scaleChanceU8(WORLDGEN_SNOWY_MUSHROOM_CHANCE, WORLDGEN_DECOR_DENSITY_SCALE)) {
           return ((getCoordinateHash(x, 6, z) & 1) == 0) ? B_brown_mushroom : B_red_mushroom;
         }
-        if (deco < WORLDGEN_PLAINS_FLOWER_CHANCE / 2) {
+        if (deco < scaleChanceU8((uint8_t)(WORLDGEN_PLAINS_FLOWER_CHANCE / 2), WORLDGEN_DECOR_DENSITY_SCALE)) {
           return getFlowerBlockFromHash(getCoordinateHash(x, 7, z), W_snowy_plains);
         }
-        if (deco < WORLDGEN_SNOWY_GRASS_CHANCE) return B_short_grass;
+        if (deco < scaleChanceU8(WORLDGEN_SNOWY_GRASS_CHANCE, WORLDGEN_DECOR_DENSITY_SCALE)) return B_short_grass;
       } else if (anchor.biome == W_mangrove_swamp) {
-        if (deco < WORLDGEN_SWAMP_MUSHROOM_CHANCE && y > 64) {
+        if (deco < scaleChanceU8(WORLDGEN_SWAMP_MUSHROOM_CHANCE, WORLDGEN_DECOR_DENSITY_SCALE) && y > 64) {
           return ((getCoordinateHash(x, 8, z) & 1) == 0) ? B_brown_mushroom : B_red_mushroom;
         }
-        if (deco < WORLDGEN_SWAMP_GRASS_CHANCE / 2 && y > 64) return B_fern;
-        if (deco < WORLDGEN_SWAMP_GRASS_CHANCE && y > 64) return B_short_grass;
+        if (deco < scaleChanceU8((uint8_t)(WORLDGEN_SWAMP_GRASS_CHANCE / 2), WORLDGEN_DECOR_DENSITY_SCALE) && y > 64) return B_fern;
+        if (deco < scaleChanceU8(WORLDGEN_SWAMP_GRASS_CHANCE, WORLDGEN_DECOR_DENSITY_SCALE) && y > 64) return B_short_grass;
       }
     }
     if (anchor.biome == W_snowy_plains && y == height + 1) {
@@ -713,15 +724,19 @@ ChunkFeature getFeatureFromAnchor (ChunkAnchor anchor) {
     grove *= grove;
 
     if (anchor.biome == W_plains) {
-      tree_chance = WORLDGEN_PLAINS_TREE_BASE_CHANCE + (int)(grove * WORLDGEN_PLAINS_TREE_PATCH_BONUS);
+      tree_chance = scaleChanceU8(WORLDGEN_PLAINS_TREE_BASE_CHANCE, WORLDGEN_TREE_DENSITY_SCALE)
+        + (int)(grove * scaleChanceU8(WORLDGEN_PLAINS_TREE_PATCH_BONUS, WORLDGEN_TREE_DENSITY_SCALE));
     } else if (anchor.biome == W_snowy_plains) {
-      tree_chance = WORLDGEN_SNOWY_TREE_BASE_CHANCE + (int)(grove * (WORLDGEN_PLAINS_TREE_PATCH_BONUS / 2));
+      tree_chance = scaleChanceU8(WORLDGEN_SNOWY_TREE_BASE_CHANCE, WORLDGEN_TREE_DENSITY_SCALE)
+        + (int)(grove * scaleChanceU8((uint8_t)(WORLDGEN_PLAINS_TREE_PATCH_BONUS / 2), WORLDGEN_TREE_DENSITY_SCALE));
     } else if (anchor.biome == W_mangrove_swamp) {
-      tree_chance = WORLDGEN_SWAMP_TREE_BASE_CHANCE + (int)(grove * WORLDGEN_SWAMP_TREE_PATCH_BONUS);
+      tree_chance = scaleChanceU8(WORLDGEN_SWAMP_TREE_BASE_CHANCE, WORLDGEN_TREE_DENSITY_SCALE)
+        + (int)(grove * scaleChanceU8(WORLDGEN_SWAMP_TREE_PATCH_BONUS, WORLDGEN_TREE_DENSITY_SCALE));
     } else {
       feature.y = 0xFF;
       return feature;
     }
+    if (tree_chance > 255) tree_chance = 255;
 
     uint8_t roll = (uint8_t)((anchor.hash >> 24) & 255);
     if (roll >= (uint8_t)tree_chance) {
